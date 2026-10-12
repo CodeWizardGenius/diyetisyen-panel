@@ -4,6 +4,24 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Diyetisyen Paneli</title>
+    <script>
+      // React yüklenmeden önce kayıtlı temayı uygula: açılışta yanlış temayla
+      // boyama (FOUC) ve Ayarlar'a geçince karanlığa "atlama" tamamen önlenir.
+      (function () {
+        try {
+          var mode = localStorage.getItem("dp_theme") || "light";
+          var resolved =
+            mode === "system"
+              ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+              : mode === "dark"
+              ? "dark"
+              : "light";
+          document.documentElement.dataset.theme = resolved;
+        } catch (e) {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

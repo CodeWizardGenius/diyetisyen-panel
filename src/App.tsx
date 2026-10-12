@@ -49,6 +49,11 @@ import {
   Calculator,
   FileText
 } from "lucide-react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { SettingsView } from "./components/settings/SettingsView";
+import { AlertsView } from "./components/alerts/AlertsView";
+import { isQuietNow, timeAgoTr } from "./components/alerts/alertEngine";
+import { loadSettings } from "./types/settings";
 
 type PatientStatus = "Aktif" | "Risk";
 
@@ -234,7 +239,38 @@ const MOCK_MEASUREMENTS: Record<number, Measurement[]> = {
   ]
 };
 
+const MEASUREMENTS_STORAGE_KEY = "dp_measurements";
+
+const readStoredMeasurements = (): Record<number, Measurement[]> => {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  try {
+    const raw = localStorage.getItem(MEASUREMENTS_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Record<number, Measurement[]>) : {};
+  } catch {
+    return {};
+  }
+};
+
+const writeStoredMeasurements = (patientId: number, list: Measurement[]): void => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    const all = readStoredMeasurements();
+    all[patientId] = list;
+    localStorage.setItem(MEASUREMENTS_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    // depolama kullanılamıyor / kota dolu — sessizce yoksay
+  }
+};
+
 const getInitialMeasurements = (patientId: number): Measurement[] => {
+  const stored = readStoredMeasurements()[patientId];
+  if (stored) {
+    return [...stored].sort((a, b) => a.date.localeCompare(b.date));
+  }
   const seed = MOCK_MEASUREMENTS[patientId];
   if (seed) {
     return [...seed].sort((a, b) => a.date.localeCompare(b.date));
@@ -261,7 +297,6 @@ const MEAL_COMPLETION = [
   { label: "Gece Ara", done: 60 }
 ];
 
-const LESS_THAN_SIXTY = "<60";
 const AUTH_TOKEN_KEY = "dp_auth_token";
 const AUTH_USER_KEY = "dp_auth_user";
 const AUTH_EXPIRES_KEY = "dp_auth_expires_at";
@@ -285,6 +320,96 @@ const formatMMSS = (totalSec: number) => {
   const ss = String(s % 60).padStart(2, "0");
   return `${mm}:${ss}`;
 };
+
+/** localStorage ile senkronize state. SSR ve kota/erişim hatalarına karşı güvenli. */
+function usePersistentState<T>(
+  key: string,
+  initial: T | (() => T)
+): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const [state, setState] = React.useState<T>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem(key);
+        if (raw !== null) {
+          return JSON.parse(raw) as T;
+        }
+      } catch {
+        // bozuk/erişilemez kayıt — başlangıç değerine düş
+      }
+    }
+    return typeof initial === "function" ? (initial as () => T)() : initial;
+  });
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      localStorage.setItem(key, JSON.stringify(state));
+    } catch {
+      // depolama kullanılamıyor / kota dolu — sessizce yoksay
+    }
+  }, [key, state]);
+
+  return [state, setState];
+}
+
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Modal/dialog erişilebilirliği: açılışta ilk alanı odaklar, Tab döngüsünü
+ * içeride tutar (focus trap), Escape ile kapatır ve kapanışta odağı geri verir.
+ * Döndürülen ref dialog kapsayıcısına bağlanmalıdır.
+ */
+function useModalDismiss(onClose: () => void) {
+  const ref = React.useRef<HTMLDivElement>(null);
+  const onCloseRef = React.useRef(onClose);
+  onCloseRef.current = onClose;
+
+  React.useEffect(() => {
+    const node = ref.current;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+
+    const getFocusables = () =>
+      Array.from(node?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? []).filter(
+        (el) => el.offsetParent !== null
+      );
+
+    getFocusables()[0]?.focus();
+
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key === "Tab") {
+        const list = getFocusables();
+        if (list.length === 0) {
+          return;
+        }
+        const first = list[0];
+        const last = list[list.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+
+    document.addEventListener("keydown", handleKey, true);
+    return () => {
+      document.removeEventListener("keydown", handleKey, true);
+      previouslyFocused?.focus?.();
+    };
+  }, []);
+
+  return ref;
+}
 
 const getAuthFromStorage = (): AuthSnapshot => {
   if (typeof window === "undefined") {
@@ -311,6 +436,14 @@ const clearAuthStorage = () => {
 };
 
 type AppTab = "dashboard" | "patients" | "plans" | "appointments" | "alerts" | "settings";
+
+const TAB_KEYS: AppTab[] = ["dashboard", "patients", "plans", "appointments", "alerts", "settings"];
+
+/** URL yolunu geçerli bir sekmeye çevirir; tanınmayan yol dashboard'a düşer. */
+const pathToTab = (pathname: string): AppTab => {
+  const slug = pathname.replace(/^\/+|\/+$/g, "");
+  return (TAB_KEYS as string[]).includes(slug) ? (slug as AppTab) : "dashboard";
+};
 
 const StatCard: React.FC<{
   title: string;
@@ -375,10 +508,12 @@ const PatientRow: React.FC<{ patient: Patient; onOpen: (patient: Patient) => voi
   </tr>
 );
 
-const PatientCard: React.FC<{ patient: Patient; onOpen: (patient: Patient) => void }> = ({
-  patient,
-  onOpen
-}) => (
+const PatientCard: React.FC<{
+  patient: Patient;
+  onOpen: (patient: Patient) => void;
+  onEdit: (patient: Patient) => void;
+  onAssignPlan: (patient: Patient) => void;
+}> = ({ patient, onOpen, onEdit, onAssignPlan }) => (
   <div className="card patient-card">
     <div className="patient-card-header">
       <span className="cell-user">
@@ -412,10 +547,125 @@ const PatientCard: React.FC<{ patient: Patient; onOpen: (patient: Patient) => vo
       <button className="btn btn-primary" onClick={() => onOpen(patient)}>
         Görüntüle
       </button>
-      <button className="btn btn-outline">Plan Ata</button>
+      <button className="btn btn-outline" onClick={() => onEdit(patient)}>Düzenle</button>
+      <button className="btn btn-outline" onClick={() => onAssignPlan(patient)}>Plan Ata</button>
     </div>
   </div>
 );
+
+type PatientDraft = {
+  name: string;
+  plan: string;
+  startDate: string;
+  endDate: string;
+  compliance: number;
+  status: PatientStatus;
+};
+
+const PatientFormModal: React.FC<{
+  initial?: Patient;
+  onClose: () => void;
+  onSubmit: (draft: PatientDraft) => void;
+}> = ({ initial, onClose, onSubmit }) => {
+  const dialogRef = useModalDismiss(onClose);
+  const today = new Date().toISOString().slice(0, 10);
+  const [values, setValues] = React.useState(() => ({
+    name: initial?.name ?? "",
+    plan: initial?.plan ?? "",
+    startDate: initial?.startDate ?? today,
+    endDate: initial?.endDate ?? "",
+    compliance: initial ? String(initial.compliance) : "0",
+    status: (initial?.status ?? "Aktif") as PatientStatus
+  }));
+  const [touched, setTouched] = React.useState(false);
+
+  const setField = (key: keyof typeof values) => (
+    event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
+  ) => setValues((prev) => ({ ...prev, [key]: event.target.value }));
+
+  const complianceNum = Number(values.compliance);
+  const errors = {
+    name: values.name.trim() === "" ? "Ad zorunludur." : "",
+    compliance:
+      values.compliance === "" || Number.isNaN(complianceNum) || complianceNum < 0 || complianceNum > 100
+        ? "0–100 arası bir değer girin."
+        : "",
+    endDate:
+      values.endDate && values.startDate && values.endDate < values.startDate
+        ? "Bitiş, başlangıçtan önce olamaz."
+        : ""
+  };
+  const invalid = Boolean(errors.name || errors.compliance || errors.endDate);
+
+  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setTouched(true);
+    if (invalid) {
+      return;
+    }
+    onSubmit({
+      name: values.name.trim(),
+      plan: values.plan.trim() || "Plan atanmadı",
+      startDate: values.startDate,
+      endDate: values.endDate || values.startDate,
+      compliance: Math.round(complianceNum),
+      status: values.status
+    });
+    onClose();
+  };
+
+  return (
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="patient-modal-title" onClick={onClose}>
+      <div className="modal" ref={dialogRef} onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h3 className="modal-title" id="patient-modal-title">{initial ? "Hasta Düzenle" : "Yeni Hasta"}</h3>
+            <p className="muted">Danışan bilgilerini girin. Ad zorunludur.</p>
+          </div>
+          <button className="btn btn-outline btn-small" onClick={onClose}>Kapat</button>
+        </div>
+        <form onSubmit={handleSubmit} noValidate>
+          <div className="form-grid">
+            <div className="form-full">
+              <label className="label" htmlFor="p-name">Ad Soyad *</label>
+              <input id="p-name" className="input" placeholder="örn. Ayşe K." value={values.name} onChange={setField("name")} />
+              {touched && errors.name ? <p className="field-error">{errors.name}</p> : null}
+            </div>
+            <div className="form-full">
+              <label className="label" htmlFor="p-plan">Plan</label>
+              <input id="p-plan" className="input" placeholder="örn. 2 Haftalık Fit Plan" value={values.plan} onChange={setField("plan")} />
+            </div>
+            <div>
+              <label className="label" htmlFor="p-start">Başlangıç</label>
+              <input id="p-start" type="date" className="input" value={values.startDate} onChange={setField("startDate")} />
+            </div>
+            <div>
+              <label className="label" htmlFor="p-end">Bitiş</label>
+              <input id="p-end" type="date" className="input" value={values.endDate} onChange={setField("endDate")} />
+              {touched && errors.endDate ? <p className="field-error">{errors.endDate}</p> : null}
+            </div>
+            <div>
+              <label className="label" htmlFor="p-compliance">Uyum (%)</label>
+              <input id="p-compliance" type="number" min={0} max={100} step={1} className="input" value={values.compliance} onChange={setField("compliance")} />
+              {touched && errors.compliance ? <p className="field-error">{errors.compliance}</p> : null}
+            </div>
+            <div>
+              <label className="label" htmlFor="p-status">Durum</label>
+              <select id="p-status" className="input" value={values.status} onChange={setField("status")}>
+                <option value="Aktif">Aktif</option>
+                <option value="Risk">Risk</option>
+              </select>
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button type="button" className="btn btn-outline" onClick={onClose}>Vazgeç</button>
+            <button type="submit" className="btn btn-primary">{initial ? "Kaydet" : "Hasta Ekle"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
 
 const MealGrid: React.FC = () => {
   const days = React.useMemo(() => Array.from({ length: 14 }, (_, i) => i + 1), []);
@@ -715,17 +965,19 @@ const MeasurementEntryModal: React.FC<{
     onClose();
   };
 
+  const dialogRef = useModalDismiss(onClose);
+
   const liveBMI =
     values.weightKg && values.heightCm && !Number.isNaN(Number(values.weightKg)) && !Number.isNaN(Number(values.heightCm))
       ? calculateBMI(Number(String(values.weightKg).replace(",", ".")), Number(String(values.heightCm).replace(",", ".")))
       : 0;
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" onClick={onClose}>
-      <div className="modal" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="measurement-modal-title" onClick={onClose}>
+      <div className="modal" ref={dialogRef} onClick={(event) => event.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <h3 className="modal-title">Yeni Ölçüm Ekle</h3>
+            <h3 className="modal-title" id="measurement-modal-title">Yeni Ölçüm Ekle</h3>
             <p className="muted">Seans ölçümünü kaydedin. Tüm sayısal alanlar zorunludur.</p>
           </div>
           <button className="btn btn-outline btn-small" onClick={onClose}>
@@ -822,11 +1074,16 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
   const latestBMI = latest ? calculateBMI(latest.weightKg, latest.heightCm) : 0;
   const latestCategory = latestBMI ? getBMICategory(latestBMI) : null;
 
-  const handleAdd = React.useCallback((measurement: Measurement) => {
-    setMeasurements((prev) =>
-      [...prev, measurement].sort((a, b) => a.date.localeCompare(b.date))
-    );
-  }, []);
+  const handleAdd = React.useCallback(
+    (measurement: Measurement) => {
+      setMeasurements((prev) => {
+        const next = [...prev, measurement].sort((a, b) => a.date.localeCompare(b.date));
+        writeStoredMeasurements(patient.id, next);
+        return next;
+      });
+    },
+    [patient.id]
+  );
 
   return (
     <div className="measurements">
@@ -1138,18 +1395,28 @@ const TargetBar: React.FC<{
   );
 };
 
-const DnDPlanEditor: React.FC = () => {
-  const [items, setItems] = React.useState<PlanItem[]>(DEFAULT_PLAN_ITEMS);
-  const [repeat, setRepeat] = React.useState({ every: 14, unit: "day" });
-  const [templateName, setTemplateName] = React.useState("2 Haftalık Fit Plan");
-  const [dietitian, setDietitian] = React.useState("Uzm. Dyt. NutriCare");
-  const [patientId, setPatientId] = React.useState<number>(PATIENTS[0]?.id ?? 1);
-  const [notes, setNotes] = React.useState("Bol su tüketin (günde en az 2 lt). Öğün saatlerine uymaya özen gösterin.");
+const DnDPlanEditor: React.FC<{ patients: Patient[] }> = ({ patients }) => {
+  const [items, setItems] = usePersistentState<PlanItem[]>("dp_plan_items", DEFAULT_PLAN_ITEMS);
+  const [repeat, setRepeat] = usePersistentState("dp_plan_repeat", { every: 14, unit: "day" });
+  const [templateName, setTemplateName] = usePersistentState("dp_plan_name", "2 Haftalık Fit Plan");
+  const [dietitian, setDietitian] = React.useState(
+    () => loadSettings().profile.dietitianName || "Uzm. Dyt. NutriCare"
+  );
+  const [patientId, setPatientId] = usePersistentState<number>("dp_plan_patient", patients[0]?.id ?? 1);
+  const [notes, setNotes] = usePersistentState(
+    "dp_plan_notes",
+    "Bol su tüketin (günde en az 2 lt). Öğün saatlerine uymaya özen gösterin."
+  );
 
-  const [profile, setProfile] = React.useState<BmrInput>({ weightKg: 70, heightCm: 170, age: 35, sex: "kadin" });
-  const [activity, setActivity] = React.useState<ActivityLevel>("orta");
-  const [goal, setGoal] = React.useState<WeightGoal>("verme");
-  const [macros, setMacros] = React.useState<MacroSplit>(GOAL_ADJUSTMENTS.verme.macros);
+  const [profile, setProfile] = usePersistentState<BmrInput>("dp_plan_profile", {
+    weightKg: 70,
+    heightCm: 170,
+    age: 35,
+    sex: "kadin"
+  });
+  const [activity, setActivity] = usePersistentState<ActivityLevel>("dp_plan_activity", "orta");
+  const [goal, setGoal] = usePersistentState<WeightGoal>("dp_plan_goal", "verme");
+  const [macros, setMacros] = usePersistentState<MacroSplit>("dp_plan_macros", GOAL_ADJUSTMENTS.verme.macros);
 
   const targets = React.useMemo(
     () => calculateTargets(profile, activity, goal, macros),
@@ -1218,7 +1485,7 @@ const DnDPlanEditor: React.FC = () => {
   }, []);
 
   const handlePdfExport = () => {
-    const patient = PATIENTS.find((p) => p.id === patientId);
+    const patient = patients.find((p) => p.id === patientId);
     const html = buildDietPrintHtml({
       dietitian: dietitian.trim() || "Uzm. Diyetisyen",
       patient: patient?.name ?? "Danışan",
@@ -1417,7 +1684,7 @@ const DnDPlanEditor: React.FC = () => {
             <div>
               <label className="label">Danışan</label>
               <select className="input" value={patientId} onChange={(event) => setPatientId(Number(event.target.value))}>
-                {PATIENTS.map((patient) => (
+                {patients.map((patient) => (
                   <option key={patient.id} value={patient.id}>
                     {patient.name}
                   </option>
@@ -1481,66 +1748,6 @@ const DnDPlanEditor: React.FC = () => {
   );
 };
 
-const AlertRulesForm: React.FC = () => (
-  <div className="card">
-    <h3>Uyarı Kuralları</h3>
-    <div className="alert-grid">
-      <div>
-        <label className="label">Uyum Eşiği (%)</label>
-        <input type="number" className="input" defaultValue={70} />
-        <p className="muted muted-spaced">Altına düşerse uyarı oluştur.</p>
-      </div>
-      <div>
-        <label className="label">İşaretlenmeyen Öğün (saat)</label>
-        <input type="number" className="input" defaultValue={4} />
-        <p className="muted muted-spaced">Öğünden sonra şu kadar saat içinde tamamlanmadıysa.</p>
-      </div>
-      <div>
-        <label className="label">Plan Bitiş Hatırlatma (gün)</label>
-        <input type="number" className="input" defaultValue={2} />
-        <p className="muted muted-spaced">Bitişe bu kadar gün kala uyar.</p>
-      </div>
-    </div>
-
-    <div className="divider" />
-
-    <div className="card-bordered">
-      <p className="card-bordered-title">Sessize Alma</p>
-      <div className="alert-checkbox-grid">
-        {["Gece 23:00-07:00", "Hafta sonu", "Tatiller"].map((labelText, index) => (
-          <label key={labelText} className="checkbox-row">
-            <input type="checkbox" defaultChecked={index === 0} />
-            <span>{labelText}</span>
-          </label>
-        ))}
-      </div>
-    </div>
-
-    <div className="card-bordered">
-      <p className="card-bordered-title">Otomatik Senaryolar</p>
-      <ul className="scenario-list">
-        <li>
-          <span>48 saatte 3 öğün kaçtı → Hastaya push bildirimi</span>
-          <button className="btn btn-outline btn-small">Düzenle</button>
-        </li>
-        <li>
-          <span>Uyum {LESS_THAN_SIXTY} → Diyetisyene e-posta</span>
-          <button className="btn btn-outline btn-small">Düzenle</button>
-        </li>
-        <li>
-          <span>Plan bitişine 1 gün → Yeni plan öner</span>
-          <button className="btn btn-outline btn-small">Düzenle</button>
-        </li>
-      </ul>
-    </div>
-
-    <div className="card-actions">
-      <button className="btn btn-primary">Kaydet</button>
-      <button className="btn btn-outline">Varsayılanlara Dön</button>
-    </div>
-  </div>
-);
-
 const LoginScreen: React.FC<{ onLogin: (email: string, password: string) => void }> = ({
   onLogin
 }) => {
@@ -1561,8 +1768,12 @@ const LoginScreen: React.FC<{ onLogin: (email: string, password: string) => void
         <h2 className="login-title">Giriş Yap</h2>
         <form className="login-form" onSubmit={handleSubmit}>
           <div>
-            <label className="label">E-posta</label>
+            <label className="label" htmlFor="login-email">E-posta</label>
             <input
+              id="login-email"
+              type="email"
+              autoComplete="username"
+              inputMode="email"
               className="input"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
@@ -1570,9 +1781,11 @@ const LoginScreen: React.FC<{ onLogin: (email: string, password: string) => void
             />
           </div>
           <div>
-            <label className="label">Şifre</label>
+            <label className="label" htmlFor="login-password">Şifre</label>
             <input
+              id="login-password"
               type="password"
+              autoComplete="current-password"
               className="input"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
@@ -1589,14 +1802,36 @@ const LoginScreen: React.FC<{ onLogin: (email: string, password: string) => void
   );
 };
 
-const MOCK_APPOINTMENTS = [
+type AppointmentStatus = "Onaylı" | "Bekliyor";
+
+type Appointment = {
+  id: string;
+  patient: string;
+  date: string; // ISO YYYY-MM-DD
+  time: string; // HH:MM
+  type: string;
+  status: AppointmentStatus;
+};
+
+const APPOINTMENT_TYPES = ["Kontrol / Ölçüm", "Online Görüşme", "Plan Revizyonu", "İlk Görüşme"];
+const APPOINTMENT_STATUSES: AppointmentStatus[] = ["Onaylı", "Bekliyor"];
+
+const SEED_APPOINTMENTS: Appointment[] = [
   { id: "r1", patient: "Barış Karapelit", date: "2025-11-12", time: "10:30", type: "Kontrol / Ölçüm", status: "Onaylı" },
   { id: "r2", patient: "Elif Y.", date: "2025-11-12", time: "11:30", type: "Online Görüşme", status: "Bekliyor" },
   { id: "r3", patient: "Meriç B.", date: "2025-11-13", time: "14:00", type: "Plan Revizyonu", status: "Onaylı" },
   { id: "r4", patient: "Elif Y.", date: "2025-11-15", time: "09:30", type: "Kontrol / Ölçüm", status: "Bekliyor" }
 ];
 
-const MOCK_NOTIFICATIONS = [
+type AppNotification = {
+  id: string;
+  title: string;
+  detail: string;
+  time: string;
+  tone: string;
+};
+
+const SEED_NOTIFICATIONS: AppNotification[] = [
   { id: "n1", title: "Uyum uyarısı", detail: "Meriç B. uyumu %54'e düştü.", time: "10 dk önce", tone: "rose" },
   { id: "n2", title: "Öğün atlandı", detail: "Barış Karapelit akşam öğününü işaretlemedi.", time: "1 sa önce", tone: "amber" },
   { id: "n3", title: "Plan bitişi", detail: "Glütensiz 14G planı 2 gün içinde bitiyor.", time: "3 sa önce", tone: "slate" }
@@ -1677,7 +1912,18 @@ const TopHeader: React.FC<{
 }> = ({ query, onQuery, user, remainingSec, onExtend, onLogout, onMenuToggle }) => {
   const [showNotifications, setShowNotifications] = React.useState(false);
   const [showProfile, setShowProfile] = React.useState(false);
+  const [notifications, setNotifications] = usePersistentState<AppNotification[]>(
+    "dp_notifications",
+    SEED_NOTIFICATIONS
+  );
   const headerRef = React.useRef<HTMLDivElement>(null);
+
+  const dismissNotification = React.useCallback(
+    (id: string) => setNotifications((prev) => prev.filter((item) => item.id !== id)),
+    [setNotifications]
+  );
+
+  const clearNotifications = React.useCallback(() => setNotifications([]), [setNotifications]);
 
   React.useEffect(() => {
     const handleClick = (event: MouseEvent) => {
@@ -1711,29 +1957,50 @@ const TopHeader: React.FC<{
             setShowNotifications((prev) => !prev);
             setShowProfile(false);
           }}
-          aria-label="Bildirimler"
+          aria-label={`Bildirimler${notifications.length ? ` (${notifications.length})` : ""}`}
         >
           <Bell size={18} />
-          <span className="ping-dot" />
+          {notifications.length > 0 ? <span className="ping-dot" /> : null}
         </button>
         {showNotifications ? (
           <div className="popover">
             <div className="popover-head">
               <strong>Bildirimler</strong>
-              <span className="muted">{MOCK_NOTIFICATIONS.length} yeni</span>
+              {notifications.length > 0 ? (
+                <button type="button" className="btn btn-link btn-small" onClick={clearNotifications}>
+                  Tümünü temizle
+                </button>
+              ) : (
+                <span className="muted">0 yeni</span>
+              )}
             </div>
-            <ul className="popover-list">
-              {MOCK_NOTIFICATIONS.map((n) => (
-                <li key={n.id} className="popover-item">
-                  <span className={classNames("tone-dot", `tone-${n.tone}`)} />
-                  <div>
-                    <strong>{n.title}</strong>
-                    <p className="muted">{n.detail}</p>
-                    <small className="muted">{n.time}</small>
-                  </div>
-                </li>
-              ))}
-            </ul>
+            {notifications.length === 0 ? (
+              <div className="popover-empty">
+                <CheckCircle2 size={18} />
+                <span>Tüm bildirimler temizlendi.</span>
+              </div>
+            ) : (
+              <ul className="popover-list">
+                {notifications.map((n) => (
+                  <li key={n.id} className="popover-item">
+                    <span className={classNames("tone-dot", `tone-${n.tone}`)} />
+                    <div>
+                      <strong>{n.title}</strong>
+                      <p className="muted">{n.detail}</p>
+                      <small className="muted">{n.time}</small>
+                    </div>
+                    <button
+                      type="button"
+                      className="icon-btn popover-dismiss"
+                      aria-label="Bildirimi kaldır"
+                      onClick={() => dismissNotification(n.id)}
+                    >
+                      <X size={14} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         ) : null}
       </div>
@@ -1777,48 +2044,197 @@ const TopHeader: React.FC<{
   );
 };
 
-const AppointmentsView: React.FC = () => (
-  <div className="card">
-    <div className="card-head">
-      <h3>
-        <CalendarDays size={16} /> Yaklaşan Randevular
-      </h3>
-      <button className="btn btn-primary btn-small">+ Yeni Randevu</button>
+type AppointmentDraft = Omit<Appointment, "id">;
+
+const AppointmentFormModal: React.FC<{
+  patients: Patient[];
+  initial?: Appointment;
+  onClose: () => void;
+  onSubmit: (draft: AppointmentDraft) => void;
+}> = ({ patients, initial, onClose, onSubmit }) => {
+  const dialogRef = useModalDismiss(onClose);
+  const [values, setValues] = React.useState<AppointmentDraft>(() => ({
+    patient: initial?.patient ?? patients[0]?.name ?? "",
+    date: initial?.date ?? new Date().toISOString().slice(0, 10),
+    time: initial?.time ?? "10:00",
+    type: initial?.type ?? APPOINTMENT_TYPES[0],
+    status: initial?.status ?? "Bekliyor"
+  }));
+  const [touched, setTouched] = React.useState(false);
+
+  const setField = <K extends keyof AppointmentDraft>(key: K) => (
+    event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
+  ) => setValues((prev) => ({ ...prev, [key]: event.target.value }));
+
+  const invalid = !values.patient || !values.date || !values.time;
+
+  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setTouched(true);
+    if (invalid) {
+      return;
+    }
+    onSubmit(values);
+    onClose();
+  };
+
+  return (
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="appt-modal-title" onClick={onClose}>
+      <div className="modal" ref={dialogRef} onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h3 className="modal-title" id="appt-modal-title">{initial ? "Randevu Düzenle" : "Yeni Randevu"}</h3>
+            <p className="muted">Danışan, tarih ve saat zorunludur.</p>
+          </div>
+          <button className="btn btn-outline btn-small" onClick={onClose}>Kapat</button>
+        </div>
+        <form onSubmit={handleSubmit} noValidate>
+          <div className="form-grid">
+            <div>
+              <label className="label" htmlFor="a-patient">Danışan *</label>
+              <select id="a-patient" className="input" value={values.patient} onChange={setField("patient")}>
+                {patients.length === 0 ? <option value="">Hasta yok</option> : null}
+                {patients.map((patient) => (
+                  <option key={patient.id} value={patient.name}>{patient.name}</option>
+                ))}
+              </select>
+              {touched && !values.patient ? <p className="field-error">Danışan seçin.</p> : null}
+            </div>
+            <div>
+              <label className="label" htmlFor="a-type">Tür</label>
+              <select id="a-type" className="input" value={values.type} onChange={setField("type")}>
+                {APPOINTMENT_TYPES.map((type) => (
+                  <option key={type} value={type}>{type}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="label" htmlFor="a-date">Tarih *</label>
+              <input id="a-date" type="date" className="input" value={values.date} onChange={setField("date")} />
+              {touched && !values.date ? <p className="field-error">Tarih girin.</p> : null}
+            </div>
+            <div>
+              <label className="label" htmlFor="a-time">Saat *</label>
+              <input id="a-time" type="time" className="input" value={values.time} onChange={setField("time")} />
+              {touched && !values.time ? <p className="field-error">Saat girin.</p> : null}
+            </div>
+            <div>
+              <label className="label" htmlFor="a-status">Durum</label>
+              <select id="a-status" className="input" value={values.status} onChange={setField("status")}>
+                {APPOINTMENT_STATUSES.map((status) => (
+                  <option key={status} value={status}>{status}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button type="button" className="btn btn-outline" onClick={onClose}>Vazgeç</button>
+            <button type="submit" className="btn btn-primary">{initial ? "Kaydet" : "Randevu Ekle"}</button>
+          </div>
+        </form>
+      </div>
     </div>
-    <div className="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>Hasta</th>
-            <th>Tarih</th>
-            <th>Saat</th>
-            <th>Tür</th>
-            <th>Durum</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {MOCK_APPOINTMENTS.map((appt) => (
-            <tr key={appt.id}>
-              <td style={{ fontWeight: 600 }}>{appt.patient}</td>
-              <td>{appt.date}</td>
-              <td>{appt.time}</td>
-              <td>{appt.type}</td>
-              <td>
-                <span className={classNames("badge", appt.status === "Onaylı" ? "badge-emerald" : "badge-amber")}>
-                  {appt.status}
-                </span>
-              </td>
-              <td style={{ textAlign: "right" }}>
-                <button className="btn btn-outline btn-small">Düzenle</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+  );
+};
+
+const AppointmentsView: React.FC<{ patients: Patient[] }> = ({ patients }) => {
+  const [appointments, setAppointments] = usePersistentState<Appointment[]>("dp_appointments", SEED_APPOINTMENTS);
+  const [modalOpen, setModalOpen] = React.useState(false);
+  const [editing, setEditing] = React.useState<Appointment | null>(null);
+
+  const sorted = React.useMemo(
+    () =>
+      [...appointments].sort((a, b) =>
+        `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`)
+      ),
+    [appointments]
+  );
+
+  const openAdd = () => {
+    setEditing(null);
+    setModalOpen(true);
+  };
+
+  const openEdit = (appt: Appointment) => {
+    setEditing(appt);
+    setModalOpen(true);
+  };
+
+  const handleSubmit = (draft: AppointmentDraft) => {
+    setAppointments((prev) =>
+      editing
+        ? prev.map((appt) => (appt.id === editing.id ? { ...editing, ...draft } : appt))
+        : [...prev, { ...draft, id: `appt-${Date.now()}` }]
+    );
+  };
+
+  const handleDelete = (id: string) => {
+    setAppointments((prev) => prev.filter((appt) => appt.id !== id));
+  };
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h3>
+          <CalendarDays size={16} /> Yaklaşan Randevular
+        </h3>
+        <button className="btn btn-primary btn-small" onClick={openAdd}>
+          <Plus size={14} /> Yeni Randevu
+        </button>
+      </div>
+      {sorted.length === 0 ? (
+        <p className="muted">Kayıtlı randevu yok. "Yeni Randevu" ile ekleyin.</p>
+      ) : (
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Hasta</th>
+                <th>Tarih</th>
+                <th>Saat</th>
+                <th>Tür</th>
+                <th>Durum</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((appt) => (
+                <tr key={appt.id}>
+                  <td style={{ fontWeight: 600 }}>{appt.patient}</td>
+                  <td>{appt.date}</td>
+                  <td>{appt.time}</td>
+                  <td>{appt.type}</td>
+                  <td>
+                    <span className={classNames("badge", appt.status === "Onaylı" ? "badge-emerald" : "badge-amber")}>
+                      {appt.status}
+                    </span>
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    <div className="row-actions">
+                      <button className="btn btn-outline btn-small" onClick={() => openEdit(appt)}>Düzenle</button>
+                      <button className="icon-btn" aria-label="Randevuyu sil" onClick={() => handleDelete(appt.id)}>
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {modalOpen ? (
+        <AppointmentFormModal
+          patients={patients}
+          initial={editing ?? undefined}
+          onClose={() => setModalOpen(false)}
+          onSubmit={handleSubmit}
+        />
+      ) : null}
     </div>
-  </div>
-);
+  );
+};
 
 const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
   const measurements = React.useMemo(() => getInitialMeasurements(patient.id), [patient.id]);
@@ -1982,12 +2398,20 @@ const DrawerNotificationsTab: React.FC<{ patient: Patient }> = ({ patient }) => 
 };
 
 const App: React.FC = () => {
-  const [query, setQuery] = React.useState("");
-  const [tab, setTab] = React.useState<AppTab>(
-    "dashboard"
+  const location = useLocation();
+  const navigate = useNavigate();
+  const tab = pathToTab(location.pathname);
+  const setTab = React.useCallback(
+    (next: AppTab) => navigate(next === "dashboard" ? "/" : `/${next}`),
+    [navigate]
   );
+
+  const [query, setQuery] = React.useState("");
+  const [patients, setPatients] = usePersistentState<Patient[]>("dp_patients", PATIENTS);
   const [selectedPatient, setSelectedPatient] = React.useState<Patient | null>(null);
   const [showDetail, setShowDetail] = React.useState(false);
+  const [patientModalOpen, setPatientModalOpen] = React.useState(false);
+  const [editingPatient, setEditingPatient] = React.useState<Patient | null>(null);
 
   const [auth, setAuth] = React.useState<AuthSnapshot>(() => getAuthFromStorage());
   const [isAuthed, setIsAuthed] = React.useState(() => {
@@ -2062,16 +2486,36 @@ const App: React.FC = () => {
   const filteredPatients = React.useMemo(() => {
     const lower = query.trim().toLowerCase();
     if (!lower) {
-      return PATIENTS;
+      return patients;
     }
-    return PATIENTS.filter((patient) => patient.name.toLowerCase().includes(lower));
-  }, [query]);
+    return patients.filter((patient) => patient.name.toLowerCase().includes(lower));
+  }, [query, patients]);
+
+  const applySessionTimeout = React.useCallback(
+    (minutes: number) => {
+      if (!isAuthed) {
+        return;
+      }
+      const safe = Math.max(5, Math.min(180, minutes || DEFAULT_DURATION_MIN));
+      const expiration = Date.now() + safe * 60 * 1000;
+      const next: AuthSnapshot = {
+        token: auth.token ?? "demo-token",
+        user: auth.user ?? "user",
+        expiresAt: expiration
+      };
+      setAuthToStorage(next);
+      setAuth(next);
+      setRemainingSec(Math.floor((expiration - Date.now()) / 1000));
+    },
+    [auth, isAuthed]
+  );
 
   const handleLogin = React.useCallback((email: string, password: string) => {
     if (!email || !password) {
       return;
     }
-    const expiration = Date.now() + DEFAULT_DURATION_MIN * 60 * 1000;
+    const sessionMin = loadSettings().security.sessionTimeoutMin || DEFAULT_DURATION_MIN;
+    const expiration = Date.now() + sessionMin * 60 * 1000;
     const next: AuthSnapshot = {
       token: "demo-token",
       user: email,
@@ -2083,6 +2527,21 @@ const App: React.FC = () => {
     setRemainingSec(Math.floor((expiration - Date.now()) / 1000));
   }, []);
 
+  const getMeasurements = React.useCallback((patientId: number) => getInitialMeasurements(patientId), []);
+
+  const enginePatients = React.useMemo(
+    () =>
+      patients.map((patient) => ({
+        id: patient.id,
+        name: patient.name,
+        plan: patient.plan,
+        compliance: patient.compliance,
+        status: patient.status,
+        endDate: patient.endDate
+      })),
+    [patients]
+  );
+
   const openDetail = React.useCallback((patient: Patient) => {
     setSelectedPatient(patient);
     setShowDetail(true);
@@ -2092,9 +2551,46 @@ const App: React.FC = () => {
     setShowDetail(false);
   }, []);
 
+  const openAddPatient = React.useCallback(() => {
+    setEditingPatient(null);
+    setPatientModalOpen(true);
+  }, []);
+
+  const openEditPatient = React.useCallback((patient: Patient) => {
+    setEditingPatient(patient);
+    setPatientModalOpen(true);
+  }, []);
+
+  const handleSavePatient = React.useCallback(
+    (draft: PatientDraft) => {
+      setPatients((prev) => {
+        if (editingPatient) {
+          return prev.map((patient) =>
+            patient.id === editingPatient.id ? { ...patient, ...draft, lastAction: "Az önce güncellendi" } : patient
+          );
+        }
+        const nextId = prev.reduce((max, patient) => Math.max(max, patient.id), 0) + 1;
+        return [...prev, { ...draft, id: nextId, lastAction: "Az önce eklendi" }];
+      });
+    },
+    [editingPatient, setPatients]
+  );
+
+  const handleAssignPlan = React.useCallback(
+    (patient: Patient) => {
+      try {
+        localStorage.setItem("dp_plan_patient", JSON.stringify(patient.id));
+      } catch {
+        // depolama kullanılamıyor — yoksay
+      }
+      setTab("plans");
+    },
+    [setTab]
+  );
+
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
   const [mobileNavOpen, setMobileNavOpen] = React.useState(false);
-  const riskCount = React.useMemo(() => PATIENTS.filter((p) => p.status === "Risk").length, []);
+  const riskCount = React.useMemo(() => patients.filter((p) => p.status === "Risk").length, [patients]);
 
   if (!isAuthed) {
     return <LoginScreen onLogin={handleLogin} />;
@@ -2147,7 +2643,12 @@ const App: React.FC = () => {
               <p className="muted">{pageTitles[tab].desc}</p>
             </div>
             {tab === "patients" ? (
-              <span className="badge badge-rose"><TrendingDown size={12} /> {riskCount} riskli hasta</span>
+              <div className="page-head-actions">
+                <span className="badge badge-rose"><TrendingDown size={12} /> {riskCount} riskli hasta</span>
+                <button className="btn btn-primary btn-small" onClick={openAddPatient}>
+                  <Plus size={14} /> Yeni Hasta
+                </button>
+              </div>
             ) : null}
           </div>
 
@@ -2228,60 +2729,70 @@ const App: React.FC = () => {
 
           {tab === "patients" && (
             <section className="tab-panel">
-              <div className="patients-grid">
-                {filteredPatients.map((patient) => (
-                  <PatientCard key={patient.id} patient={patient} onOpen={openDetail} />
-                ))}
-              </div>
+              {filteredPatients.length === 0 ? (
+                <div className="card">
+                  <p className="muted">
+                    {query.trim()
+                      ? `"${query}" ile eşleşen hasta yok.`
+                      : 'Henüz hasta yok. "Yeni Hasta" ile ekleyin.'}
+                  </p>
+                </div>
+              ) : (
+                <div className="patients-grid">
+                  {filteredPatients.map((patient) => (
+                    <PatientCard
+                      key={patient.id}
+                      patient={patient}
+                      onOpen={openDetail}
+                      onEdit={openEditPatient}
+                      onAssignPlan={handleAssignPlan}
+                    />
+                  ))}
+                </div>
+              )}
             </section>
           )}
 
           {tab === "plans" && (
             <section className="tab-panel">
-              <DnDPlanEditor />
+              <DnDPlanEditor patients={patients} />
             </section>
           )}
 
           {tab === "appointments" && (
             <section className="tab-panel">
-              <AppointmentsView />
+              <AppointmentsView patients={patients} />
             </section>
           )}
 
           {tab === "alerts" && (
             <section className="tab-panel">
-              <AlertRulesForm />
+              <AlertsView
+                patients={enginePatients}
+                getMeasurements={getMeasurements}
+                onOpenPatient={(patientId) => {
+                  const target = patients.find((patient) => patient.id === patientId);
+                  if (target) {
+                    openDetail(target);
+                  }
+                }}
+              />
             </section>
           )}
 
           {tab === "settings" && (
             <section className="tab-panel">
-              <div className="card">
-                <div className="card-head">
-                  <h3><Settings size={15} /> Genel Ayarlar</h3>
-                </div>
-                <div className="settings-grid">
-                  <div>
-                    <label className="label">Bildirim Saatleri (Varsayılan)</label>
-                    <div className="settings-time-grid">
-                      {["09:00", "11:00", "13:30", "16:30", "19:30", "22:30"].map((time) => (
-                        <input key={time} defaultValue={time} className="input" />
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="label">Uyum Eşiği (%)</label>
-                    <div className="settings-threshold">
-                      <input type="number" defaultValue={70} className="input" />
-                      <span className="muted">Altında uyarı üret</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="card-actions">
-                  <button className="btn btn-primary">Kaydet</button>
-                  <button className="btn btn-outline">Sıfırla</button>
-                </div>
-              </div>
+              <SettingsView
+                patients={filteredPatients.map((patient) => ({
+                  id: patient.id,
+                  name: patient.name,
+                  plan: patient.plan,
+                  compliance: patient.compliance,
+                  status: patient.status
+                }))}
+                getMeasurements={getMeasurements}
+                onSessionTimeoutSave={applySessionTimeout}
+              />
             </section>
           )}
         </main>
@@ -2289,14 +2800,21 @@ const App: React.FC = () => {
         <footer className="app-footer">© {new Date().getFullYear()} NutriCare · Diyetisyen Paneli</footer>
 
         {showDetail ? <PatientDetailDrawer patient={selectedPatient} onClose={closeDetail} /> : null}
+
+        {patientModalOpen ? (
+          <PatientFormModal
+            initial={editingPatient ?? undefined}
+            onClose={() => setPatientModalOpen(false)}
+            onSubmit={handleSavePatient}
+          />
+        ) : null}
       </div>
     </div>
   );
 };
 
-if (typeof window !== "undefined") {
+if (import.meta.env.DEV && typeof window !== "undefined") {
   try {
-    console.assert(LESS_THAN_SIXTY === "<60", "LESS_THAN_SIXTY sabiti beklenen değerde değil");
     console.assert(formatMMSS(61) === "01:01", "formatMMSS(61) => 01:01 olmalı");
     console.assert(formatMMSS(0) === "00:00", "formatMMSS(0) => 00:00 olmalı");
     console.assert(formatMMSS(3599) === "59:59", "formatMMSS(3599) => 59:59 olmalı");
@@ -2310,6 +2828,18 @@ if (typeof window !== "undefined") {
     console.assert(
       calculateTargets({ weightKg: 70, heightCm: 170, age: 30, sex: "erkek" }, "orta", "koruma", { carbsPct: 50, proteinPct: 20, fatPct: 30 }).targetCalories === 2508,
       "TDEE 1618x1.55 koruma => 2508 olmalı"
+    );
+    console.assert(
+      timeAgoTr(new Date(Date.now() - 5 * 60000).toISOString()) === "5 dk önce",
+      "timeAgoTr(5dk) => 5 dk önce olmalı"
+    );
+    console.assert(
+      isQuietNow(["23:00", "07:00"], true, new Date(2025, 0, 1, 2, 0)) === true,
+      "02:00 sessiz saat içinde olmalı"
+    );
+    console.assert(
+      isQuietNow(["23:00", "07:00"], true, new Date(2025, 0, 1, 12, 0)) === false,
+      "12:00 sessiz saat dışında olmalı"
     );
   } catch (error) {
     // no-op
