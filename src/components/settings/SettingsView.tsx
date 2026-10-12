@@ -22,13 +22,15 @@ import { ProfilePanel } from "./panels/ProfilePanel";
 import { NutritionPanel } from "./panels/NutritionPanel";
 import { NotificationsPanel } from "./panels/NotificationsPanel";
 import { SchedulePanel } from "./panels/SchedulePanel";
-import { SecurityPanel } from "./panels/SecurityPanel";
+import { SecurityPanel, type ImportResult } from "./panels/SecurityPanel";
 
 interface Props {
   patients: SettingsPatient[];
   getMeasurements: (patientId: number) => MeasurementLike[];
   /** Kaydetmede yeni zaman aşımını mevcut auth oturumuna uygular. */
   onSessionTimeoutSave: (minutes: number) => void;
+  /** Yedek JSON'ı uygular; sonucu döndürür. */
+  onImportData: (raw: unknown) => ImportResult;
 }
 
 const SECTIONS: Array<{ key: SettingsSectionKey; label: string; icon: React.ReactNode }> = [
@@ -87,7 +89,7 @@ const collectErrors = (draft: ClinicSettings): string[] => {
   return errors;
 };
 
-export const SettingsView: React.FC<Props> = ({ patients, getMeasurements, onSessionTimeoutSave }) => {
+export const SettingsView: React.FC<Props> = ({ patients, getMeasurements, onSessionTimeoutSave, onImportData }) => {
   const { draft, updateDraft, isDirty, save, resetDefaults, toast } = useSettings();
   const [section, setSection] = React.useState<SettingsSectionKey>("profil");
 
@@ -152,6 +154,7 @@ export const SettingsView: React.FC<Props> = ({ patients, getMeasurements, onSes
               patients={patients}
               getMeasurements={getMeasurements}
               dietitianName={draft.profile.dietitianName}
+              onImportData={onImportData}
             />
           ) : null}
         </div>

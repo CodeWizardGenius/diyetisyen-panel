@@ -1,5 +1,5 @@
 import React from "react";
-import { Download, FileJson, FileSpreadsheet, Monitor, Moon, ShieldCheck, Sun } from "lucide-react";
+import { Download, FileJson, FileSpreadsheet, Monitor, Moon, ShieldCheck, Sun, Upload } from "lucide-react";
 import type {
   MeasurementLike,
   SettingsPatient
@@ -8,6 +8,11 @@ import { useTheme, type ThemeMode } from "../../../context/ThemeContext";
 import { Field, SectionCard } from "../ui";
 import { classNames } from "../classNames";
 
+export interface ImportResult {
+  ok: boolean;
+  message: string;
+}
+
 interface Props {
   sessionTimeoutMin: number;
   onSessionTimeoutChange: (minutes: number) => void;
@@ -15,6 +20,8 @@ interface Props {
   patients: SettingsPatient[];
   getMeasurements: (patientId: number) => MeasurementLike[];
   dietitianName: string;
+  /** Yedek JSON'ı uygular; sonucu (başarı/mesaj) döndürür. */
+  onImportData: (raw: unknown) => ImportResult;
 }
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: React.ReactNode }> = [
@@ -43,10 +50,36 @@ export const SecurityPanel: React.FC<Props> = ({
   sessionTimeoutError,
   patients,
   getMeasurements,
-  dietitianName
+  dietitianName,
+  onImportData
 }) => {
   const { theme, resolvedTheme, setTheme } = useTheme();
   const [exported, setExported] = React.useState<string | null>(null);
+  const [importMsg, setImportMsg] = React.useState<{ ok: boolean; text: string } | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const handleImportFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = ""; // aynı dosya tekrar seçilebilsin
+    if (!file) {
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed: unknown = JSON.parse(String(reader.result));
+        if (!window.confirm("Yedek içe aktarılsın mı? Mevcut danışan ve ölçüm verileri bu yedekle değiştirilecek.")) {
+          return;
+        }
+        const result = onImportData(parsed);
+        setImportMsg({ ok: result.ok, text: result.message });
+      } catch {
+        setImportMsg({ ok: false, text: "Dosya okunamadı — geçerli bir JSON yedeği seçin." });
+      }
+    };
+    reader.onerror = () => setImportMsg({ ok: false, text: "Dosya okunamadı." });
+    reader.readAsText(file);
+  };
 
   const exportJson = () => {
     const payload = {
@@ -138,8 +171,8 @@ export const SecurityPanel: React.FC<Props> = ({
       </SectionCard>
 
       <SectionCard
-        title="Danışan Verilerini Dışa Aktar"
-        description="Tüm danışanlar ve ölçüm geçmişleri — acil durum yedeği için."
+        title="Danışan Verilerini Yedekle"
+        description="Tüm danışanlar ve ölçüm geçmişleri — dışa aktarın veya bir yedekten geri yükleyin."
         icon={<Download size={15} />}
       >
         <div className="card-actions">
@@ -149,8 +182,25 @@ export const SecurityPanel: React.FC<Props> = ({
           <button type="button" className="btn btn-outline btn-small" onClick={exportCsv}>
             <FileSpreadsheet size={14} /> CSV İndir
           </button>
+          <button type="button" className="btn btn-outline btn-small" onClick={() => fileInputRef.current?.click()}>
+            <Upload size={14} /> JSON Yükle
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="visually-hidden"
+            onChange={handleImportFile}
+            aria-hidden="true"
+            tabIndex={-1}
+          />
         </div>
         {exported ? <p className="muted muted-spaced">{exported}</p> : null}
+        {importMsg ? (
+          <p className={classNames("muted-spaced", importMsg.ok ? "import-ok" : "field-error")} role="status">
+            {importMsg.text}
+          </p>
+        ) : null}
       </SectionCard>
     </>
   );

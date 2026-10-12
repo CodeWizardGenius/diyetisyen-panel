@@ -4,6 +4,7 @@ import ReactDOM from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 import App from "./App";
 import { ThemeProvider } from "./context/ThemeContext";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./main.css";
 
 // GitHub Pages statik bir host; HTML5 BrowserRouter ile alt rotada (ör. /settings)
@@ -13,9 +14,11 @@ import "./main.css";
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ThemeProvider>
-      <HashRouter>
-        <App />
-      </HashRouter>
+      <ErrorBoundary>
+        <HashRouter>
+          <App />
+        </HashRouter>
+      </ErrorBoundary>
     </ThemeProvider>
   </React.StrictMode>
 );

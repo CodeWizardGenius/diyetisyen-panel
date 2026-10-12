@@ -95,6 +95,10 @@ export interface SettingsPatient {
   plan: string;
   compliance: number;
   status: string;
+  /** Yedekleme/geri yükleme için opsiyonel tam alanlar. */
+  startDate?: string;
+  endDate?: string;
+  lastAction?: string;
 }
 
 export interface MeasurementLike {

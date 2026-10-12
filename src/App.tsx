@@ -513,7 +513,8 @@ const PatientCard: React.FC<{
   onOpen: (patient: Patient) => void;
   onEdit: (patient: Patient) => void;
   onAssignPlan: (patient: Patient) => void;
-}> = ({ patient, onOpen, onEdit, onAssignPlan }) => (
+  onDelete: (patient: Patient) => void;
+}> = ({ patient, onOpen, onEdit, onAssignPlan, onDelete }) => (
   <div className="card patient-card">
     <div className="patient-card-header">
       <span className="cell-user">
@@ -549,6 +550,9 @@ const PatientCard: React.FC<{
       </button>
       <button className="btn btn-outline" onClick={() => onEdit(patient)}>Düzenle</button>
       <button className="btn btn-outline" onClick={() => onAssignPlan(patient)}>Plan Ata</button>
+      <button className="icon-btn patient-delete" aria-label={`${patient.name} sil`} onClick={() => onDelete(patient)}>
+        <Trash2 size={15} />
+      </button>
     </div>
   </div>
 );
@@ -1823,6 +1827,25 @@ const SEED_APPOINTMENTS: Appointment[] = [
   { id: "r4", patient: "Elif Y.", date: "2025-11-15", time: "09:30", type: "Kontrol / Ölçüm", status: "Bekliyor" }
 ];
 
+const APPOINTMENTS_STORAGE_KEY = "dp_appointments";
+
+/** Dashboard özeti için randevuları salt-okunur okur; yoksa/bozuksa çekirdek veriye düşer. */
+const readStoredAppointments = (): Appointment[] => {
+  if (typeof window === "undefined") {
+    return SEED_APPOINTMENTS;
+  }
+  try {
+    const raw = localStorage.getItem(APPOINTMENTS_STORAGE_KEY);
+    if (!raw) {
+      return SEED_APPOINTMENTS;
+    }
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as Appointment[]) : SEED_APPOINTMENTS;
+  } catch {
+    return SEED_APPOINTMENTS;
+  }
+};
+
 type AppNotification = {
   id: string;
   title: string;
@@ -1852,7 +1875,9 @@ const Sidebar: React.FC<{
   collapsed: boolean;
   onToggle: () => void;
   riskCount: number;
-}> = ({ tab, onNavigate, collapsed, onToggle, riskCount }) => (
+  avgCompliance: number;
+  patientCount: number;
+}> = ({ tab, onNavigate, collapsed, onToggle, riskCount, avgCompliance, patientCount }) => (
   <aside className={classNames("sidebar", collapsed && "sidebar-collapsed")}>
     <div className="sidebar-brand">
       <span className="sidebar-logo">
@@ -1892,8 +1917,8 @@ const Sidebar: React.FC<{
         <div className="sidebar-wellness">
           <Activity size={16} />
           <div>
-            <strong>Ortalama Uyum %76</strong>
-            <small>Son 7 gün · stabil</small>
+            <strong>Ortalama Uyum %{avgCompliance}</strong>
+            <small>{patientCount} danışan · {riskCount} riskli</small>
           </div>
         </div>
       </div>
@@ -1904,12 +1929,14 @@ const Sidebar: React.FC<{
 const TopHeader: React.FC<{
   query: string;
   onQuery: (value: string) => void;
+  showSearch: boolean;
+  searchPlaceholder: string;
   user: string | null;
   remainingSec: number;
   onExtend: () => void;
   onLogout: () => void;
   onMenuToggle: () => void;
-}> = ({ query, onQuery, user, remainingSec, onExtend, onLogout, onMenuToggle }) => {
+}> = ({ query, onQuery, showSearch, searchPlaceholder, user, remainingSec, onExtend, onLogout, onMenuToggle }) => {
   const [showNotifications, setShowNotifications] = React.useState(false);
   const [showProfile, setShowProfile] = React.useState(false);
   const [notifications, setNotifications] = usePersistentState<AppNotification[]>(
@@ -1941,10 +1968,17 @@ const TopHeader: React.FC<{
       <button className="icon-btn menu-btn" onClick={onMenuToggle} aria-label="Menü">
         <Menu size={18} />
       </button>
-      <div className="search">
-        <Search size={16} className="search-icon" />
-        <input placeholder="Hasta ara..." value={query} onChange={(event) => onQuery(event.target.value)} />
-      </div>
+      {showSearch ? (
+        <div className="search">
+          <Search size={16} className="search-icon" />
+          <input
+            placeholder={searchPlaceholder}
+            value={query}
+            onChange={(event) => onQuery(event.target.value)}
+            aria-label={searchPlaceholder}
+          />
+        </div>
+      ) : null}
       <div className="spacer" />
       <span className="session-chip">
         <Timer size={14} />
@@ -2067,6 +2101,7 @@ const AppointmentFormModal: React.FC<{
   ) => setValues((prev) => ({ ...prev, [key]: event.target.value }));
 
   const invalid = !values.patient || !values.date || !values.time;
+  const isPastDate = Boolean(values.date) && values.date < new Date().toISOString().slice(0, 10);
 
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -2111,7 +2146,11 @@ const AppointmentFormModal: React.FC<{
             <div>
               <label className="label" htmlFor="a-date">Tarih *</label>
               <input id="a-date" type="date" className="input" value={values.date} onChange={setField("date")} />
-              {touched && !values.date ? <p className="field-error">Tarih girin.</p> : null}
+              {touched && !values.date ? (
+                <p className="field-error">Tarih girin.</p>
+              ) : isPastDate ? (
+                <p className="field-warning">Bu tarih geçmişte — yine de kaydedebilirsiniz.</p>
+              ) : null}
             </div>
             <div>
               <label className="label" htmlFor="a-time">Saat *</label>
@@ -2137,18 +2176,22 @@ const AppointmentFormModal: React.FC<{
   );
 };
 
-const AppointmentsView: React.FC<{ patients: Patient[] }> = ({ patients }) => {
-  const [appointments, setAppointments] = usePersistentState<Appointment[]>("dp_appointments", SEED_APPOINTMENTS);
+const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ patients, query }) => {
+  const [appointments, setAppointments] = usePersistentState<Appointment[]>(APPOINTMENTS_STORAGE_KEY, SEED_APPOINTMENTS);
   const [modalOpen, setModalOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Appointment | null>(null);
 
-  const sorted = React.useMemo(
-    () =>
-      [...appointments].sort((a, b) =>
-        `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`)
-      ),
-    [appointments]
-  );
+  const sorted = React.useMemo(() => {
+    const lower = query.trim().toLowerCase();
+    return [...appointments]
+      .filter(
+        (appt) =>
+          !lower ||
+          appt.patient.toLowerCase().includes(lower) ||
+          appt.type.toLowerCase().includes(lower)
+      )
+      .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+  }, [appointments, query]);
 
   const openAdd = () => {
     setEditing(null);
@@ -2183,7 +2226,11 @@ const AppointmentsView: React.FC<{ patients: Patient[] }> = ({ patients }) => {
         </button>
       </div>
       {sorted.length === 0 ? (
-        <p className="muted">Kayıtlı randevu yok. "Yeni Randevu" ile ekleyin.</p>
+        <p className="muted">
+          {query.trim()
+            ? `"${query}" ile eşleşen randevu yok.`
+            : 'Kayıtlı randevu yok. "Yeni Randevu" ile ekleyin.'}
+        </p>
       ) : (
         <div className="table-scroll">
           <table>
@@ -2588,9 +2635,124 @@ const App: React.FC = () => {
     [setTab]
   );
 
+  const handleDeletePatient = React.useCallback(
+    (patient: Patient) => {
+      if (!window.confirm(`${patient.name} silinsin mi? Danışanın ölçüm geçmişi de kaldırılır.`)) {
+        return;
+      }
+      setPatients((prev) => prev.filter((item) => item.id !== patient.id));
+      // Danışanın ölçüm geçmişini de temizle (varsa).
+      try {
+        const all = readStoredMeasurements();
+        if (patient.id in all) {
+          delete all[patient.id];
+          localStorage.setItem(MEASUREMENTS_STORAGE_KEY, JSON.stringify(all));
+        }
+      } catch {
+        // depolama kullanılamıyor — yoksay
+      }
+      if (selectedPatient?.id === patient.id) {
+        setShowDetail(false);
+      }
+    },
+    [setPatients, selectedPatient]
+  );
+
+  const handleImportData = React.useCallback(
+    (raw: unknown): { ok: boolean; message: string } => {
+      if (typeof raw !== "object" || raw === null || !Array.isArray((raw as { patients?: unknown }).patients)) {
+        return { ok: false, message: "Geçersiz yedek: 'patients' listesi bulunamadı." };
+      }
+      const today = new Date().toISOString().slice(0, 10);
+      const isDate = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+      const num = (value: unknown, fallback = 0): number =>
+        typeof value === "number" && Number.isFinite(value) ? value : fallback;
+
+      const rows = (raw as { patients: unknown[] }).patients;
+      const nextPatients: Patient[] = [];
+      const nextMeasurements: Record<number, Measurement[]> = {};
+      const usedIds = new Set<number>();
+      let measurementCount = 0;
+
+      rows.forEach((entry, index) => {
+        if (typeof entry !== "object" || entry === null) {
+          return;
+        }
+        const row = entry as Record<string, unknown>;
+        if (typeof row.name !== "string" || !row.name.trim()) {
+          return;
+        }
+        let id = Number(row.id);
+        if (!Number.isInteger(id) || id <= 0 || usedIds.has(id)) {
+          id = (usedIds.size ? Math.max(...usedIds) : index) + 1;
+        }
+        usedIds.add(id);
+
+        const startDate = isDate(row.startDate) ? (row.startDate as string) : today;
+        nextPatients.push({
+          id,
+          name: row.name.trim(),
+          plan: typeof row.plan === "string" && row.plan.trim() ? row.plan.trim() : "Plan atanmadı",
+          startDate,
+          endDate: isDate(row.endDate) ? (row.endDate as string) : startDate,
+          compliance: Math.max(0, Math.min(100, Math.round(num(row.compliance)))),
+          lastAction: typeof row.lastAction === "string" && row.lastAction ? row.lastAction : "İçe aktarıldı",
+          status: row.status === "Risk" ? "Risk" : "Aktif"
+        });
+
+        if (Array.isArray(row.measurements)) {
+          const valid = (row.measurements as unknown[])
+            .filter((m): m is Record<string, unknown> => typeof m === "object" && m !== null && isDate((m as Record<string, unknown>).date))
+            .map((m, mi) => ({
+              id: typeof m.id === "string" ? (m.id as string) : `imp-${id}-${mi}`,
+              date: m.date as string,
+              weightKg: num(m.weightKg),
+              heightCm: num(m.heightCm),
+              bodyFatPercentage: num(m.bodyFatPercentage),
+              muscleMassKg: num(m.muscleMassKg),
+              waistCm: num(m.waistCm),
+              hipCm: num(m.hipCm),
+              notes: typeof m.notes === "string" ? (m.notes as string) : ""
+            }));
+          if (valid.length > 0) {
+            nextMeasurements[id] = valid;
+            measurementCount += valid.length;
+          }
+        }
+      });
+
+      if (nextPatients.length === 0) {
+        return { ok: false, message: "Yedekte geçerli danışan kaydı bulunamadı." };
+      }
+
+      setPatients(nextPatients);
+      try {
+        localStorage.setItem(MEASUREMENTS_STORAGE_KEY, JSON.stringify(nextMeasurements));
+      } catch {
+        // depolama kullanılamıyor — yoksay
+      }
+      setShowDetail(false);
+      return {
+        ok: true,
+        message: `${nextPatients.length} danışan ve ${measurementCount} ölçüm geri yüklendi.`
+      };
+    },
+    [setPatients]
+  );
+
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
   const [mobileNavOpen, setMobileNavOpen] = React.useState(false);
   const riskCount = React.useMemo(() => patients.filter((p) => p.status === "Risk").length, [patients]);
+
+  const dashboardStats = React.useMemo(() => {
+    const total = patients.length;
+    const active = patients.filter((p) => p.status === "Aktif").length;
+    const avgCompliance =
+      total > 0 ? Math.round(patients.reduce((sum, p) => sum + (p.compliance || 0), 0) / total) : 0;
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const upcomingAppointments = readStoredAppointments().filter((appt) => appt.date >= todayIso).length;
+    return { total, active, avgCompliance, upcomingAppointments };
+  }, [patients, tab]);
 
   if (!isAuthed) {
     return <LoginScreen onLogin={handleLogin} />;
@@ -2605,6 +2767,16 @@ const App: React.FC = () => {
     settings: { title: "Ayarlar", desc: "Varsayılan bildirim ve eşik ayarları" }
   };
 
+  // Global arama yalnızca filtrelenebilir bir listesi olan sekmelerde gösterilir.
+  // (Planlar/Ayarlar: filtrelenecek liste yok · Uyarılar: kendi aramasına sahip.)
+  const searchPlaceholders: Partial<Record<AppTab, string>> = {
+    dashboard: "Hasta ara...",
+    patients: "Hasta ara...",
+    appointments: "Randevu ara (hasta veya tür)..."
+  };
+  const showSearch = tab in searchPlaceholders;
+  const searchPlaceholder = searchPlaceholders[tab] ?? "Ara...";
+
   return (
     <div className="layout app-shell">
       <Sidebar
@@ -2616,6 +2788,8 @@ const App: React.FC = () => {
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed((prev) => !prev)}
         riskCount={riskCount}
+        avgCompliance={dashboardStats.avgCompliance}
+        patientCount={dashboardStats.total}
       />
       {mobileNavOpen ? <div className="sidebar-scrim" onClick={() => setMobileNavOpen(false)} /> : null}
 
@@ -2623,6 +2797,8 @@ const App: React.FC = () => {
         <TopHeader
           query={query}
           onQuery={setQuery}
+          showSearch={showSearch}
+          searchPlaceholder={searchPlaceholder}
           user={auth.user}
           remainingSec={remainingSec}
           onExtend={() => extendSession(15)}
@@ -2655,10 +2831,10 @@ const App: React.FC = () => {
           {tab === "dashboard" && (
             <section className="tab-panel">
               <div className="grid grid-md-4">
-                <StatCard title="Toplam Hasta" value="48" subtitle="Bu ay +6" tone="emerald" icon={<Users size={18} />} />
-                <StatCard title="Ortalama Uyum" value="%76" subtitle="Son 7 gün" tone="mint" icon={<CheckCircle2 size={18} />} />
-                <StatCard title="Devam Eden Plan" value="23" subtitle="14 günlük" tone="slate" icon={<Clock size={18} />} />
-                <StatCard title="Bugün Tamamlanan" value="112" subtitle="Öğün" tone="amber" icon={<CalendarDays size={18} />} />
+                <StatCard title="Toplam Hasta" value={String(dashboardStats.total)} subtitle={`${dashboardStats.active} aktif danışan`} tone="emerald" icon={<Users size={18} />} />
+                <StatCard title="Ortalama Uyum" value={`%${dashboardStats.avgCompliance}`} subtitle="Tüm danışanlar" tone="mint" icon={<CheckCircle2 size={18} />} />
+                <StatCard title="Riskli Danışan" value={String(riskCount)} subtitle={riskCount > 0 ? "Takip gerekli" : "Risk yok"} tone="slate" icon={<TrendingDown size={18} />} />
+                <StatCard title="Yaklaşan Randevu" value={String(dashboardStats.upcomingAppointments)} subtitle="Bugün ve sonrası" tone="amber" icon={<CalendarDays size={18} />} />
               </div>
 
               <div className="grid grid-lg-5 dashboard-charts">
@@ -2746,6 +2922,7 @@ const App: React.FC = () => {
                       onOpen={openDetail}
                       onEdit={openEditPatient}
                       onAssignPlan={handleAssignPlan}
+                      onDelete={handleDeletePatient}
                     />
                   ))}
                 </div>
@@ -2761,7 +2938,7 @@ const App: React.FC = () => {
 
           {tab === "appointments" && (
             <section className="tab-panel">
-              <AppointmentsView patients={patients} />
+              <AppointmentsView patients={patients} query={query} />
             </section>
           )}
 
@@ -2788,10 +2965,14 @@ const App: React.FC = () => {
                   name: patient.name,
                   plan: patient.plan,
                   compliance: patient.compliance,
-                  status: patient.status
+                  status: patient.status,
+                  startDate: patient.startDate,
+                  endDate: patient.endDate,
+                  lastAction: patient.lastAction
                 }))}
                 getMeasurements={getMeasurements}
                 onSessionTimeoutSave={applySessionTimeout}
+                onImportData={handleImportData}
               />
             </section>
           )}
