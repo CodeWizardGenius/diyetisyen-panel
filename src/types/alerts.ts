@@ -1,5 +1,7 @@
 /** Uyarı & Risk Yönetim Merkezi için veri modelleri ve kalıcı depolama yardımcıları. */
 
+import { loadSettings } from "./settings";
+
 export type AlertSeverity = "critical" | "warning" | "info";
 export type AlertCategory = "adherence" | "missed_meal" | "plan_expiration" | "weight_plateau";
 
@@ -43,6 +45,22 @@ export const DEFAULT_ALERT_RULES: AlertRules = {
   autoNotifyPatient: true,
   autoEmailDietitian: true,
   autoRenewalPrompt: true
+};
+
+/** Kayıtlı kural yokken kullanılacak varsayılan: Ayarlar > Bildirimler & Risk değerleri. */
+export const rulesFromClinicSettings = (): AlertRules => {
+  try {
+    const clinic = loadSettings();
+    return {
+      ...DEFAULT_ALERT_RULES,
+      complianceThreshold: clinic.notifications.complianceThreshold,
+      missedMealHours: clinic.notifications.missedMealHours,
+      quietHoursEnabled: true,
+      quietHoursRange: [clinic.notifications.quietStart, clinic.notifications.quietEnd]
+    };
+  } catch {
+    return { ...DEFAULT_ALERT_RULES };
+  }
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>

@@ -27,6 +27,7 @@ import {
   loadAlertRules,
   loadDismissedIds,
   loadResolvedIds,
+  rulesFromClinicSettings,
   saveAlertRules,
   saveDismissedIds,
   saveResolvedIds,
@@ -44,21 +45,6 @@ interface Props {
 
 type AlertsTab = "inbox" | "rules";
 type FeedFilter = "all" | AlertSeverity | "resolved";
-
-const rulesFromClinicSettings = (): AlertRules => {
-  try {
-    const clinic = loadSettings();
-    return {
-      ...DEFAULT_ALERT_RULES,
-      complianceThreshold: clinic.notifications.complianceThreshold,
-      missedMealHours: clinic.notifications.missedMealHours,
-      quietHoursEnabled: true,
-      quietHoursRange: [clinic.notifications.quietStart, clinic.notifications.quietEnd]
-    };
-  } catch {
-    return { ...DEFAULT_ALERT_RULES };
-  }
-};
 
 /** Ortak alanları Ayarlar > Bildirimler & Risk'e geri yazar; iki ekran aynı değerleri göstersin. */
 const syncClinicSettingsWithRules = (rules: AlertRules): void => {
@@ -337,7 +323,10 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, onOpenP
 
   const handleWhatsApp = React.useCallback(
     (alert: PatientAlert) => {
-      showToast(`${alert.patientName} için WhatsApp mesajı hazırlandı (demo).`);
+      // Danışan telefonu tutulmadığından alıcı WhatsApp'ta seçilir; mesaj önceden doldurulur.
+      const text = `Merhaba ${alert.patientName}, ${alert.title}. ${alert.description}`;
+      window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank", "noopener,noreferrer");
+      showToast(`${alert.patientName} için WhatsApp mesajı yeni sekmede açıldı.`);
     },
     [showToast]
   );

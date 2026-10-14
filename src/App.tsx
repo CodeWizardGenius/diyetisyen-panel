@@ -52,9 +52,26 @@ import {
 import { useLocation, useNavigate } from "react-router-dom";
 import { SettingsView } from "./components/settings/SettingsView";
 import { AlertsView } from "./components/alerts/AlertsView";
-import { isQuietNow, timeAgoTr } from "./components/alerts/alertEngine";
-import { loadSettings, SETTINGS_STORAGE_KEY } from "./types/settings";
-import { ALERT_RULES_STORAGE_KEY } from "./types/alerts";
+import { buildAlerts, isQuietNow, timeAgoTr } from "./components/alerts/alertEngine";
+import {
+  calculateBmrWithFormula,
+  isValidTime,
+  loadSettings,
+  MACRO_PRESETS,
+  SETTINGS_STORAGE_KEY,
+  type BmrFormula,
+  type ProfileSettings,
+  type ScheduleSettings
+} from "./types/settings";
+import {
+  ALERT_RULES_STORAGE_KEY,
+  loadAlertRules,
+  loadDismissedIds,
+  loadResolvedIds,
+  rulesFromClinicSettings,
+  SEVERITY_META,
+  type PatientAlert
+} from "./types/alerts";
 import { THEME_STORAGE_KEY } from "./context/ThemeContext";
 
 type PatientStatus = "Aktif" | "Risk";
@@ -155,22 +172,21 @@ const GOAL_ADJUSTMENTS: Record<WeightGoal, { delta: number; label: string; macro
   alma: { delta: 300, label: "Kilo alma", macros: { carbsPct: 55, proteinPct: 20, fatPct: 25 } }
 };
 
-/** Mifflin-St Jeor: erkek +5, kadın -161 */
-const calculateBMR = ({ weightKg, heightCm, age, sex }: BmrInput): number => {
-  if (!weightKg || !heightCm || !age || weightKg <= 0 || heightCm <= 0 || age <= 0) {
-    return 0;
-  }
-  const base = 10 * weightKg + 6.25 * heightCm - 5 * age;
-  return Math.round(sex === "erkek" ? base + 5 : base - 161);
+const BMR_FORMULA_LABELS: Record<BmrFormula, string> = {
+  mifflin: "Mifflin-St Jeor",
+  harris: "Harris-Benedict"
 };
 
 const calculateTargets = (
   input: BmrInput,
   activity: ActivityLevel,
   goal: WeightGoal,
-  macros: MacroSplit
+  macros: MacroSplit,
+  formula: BmrFormula
 ): CalorieTarget => {
-  const bmr = calculateBMR(input);
+  // Formül yalnızca sıfır değeri yakalar; negatif girdide de BMR 0 olsun.
+  const safeInput = input.weightKg > 0 && input.heightCm > 0 && input.age > 0 ? input : { ...input, weightKg: 0 };
+  const bmr = calculateBmrWithFormula(safeInput, formula);
   const tdee = Math.round(bmr * ACTIVITY_FACTORS[activity].factor);
   const targetCalories = Math.max(1200, tdee + GOAL_ADJUSTMENTS[goal].delta);
   const total = macros.carbsPct + macros.proteinPct + macros.fatPct;
@@ -268,6 +284,53 @@ const writeStoredMeasurements = (patientId: number, list: Measurement[]): void =
   }
 };
 
+/** Danışan bazlı kayıtlar: { [patientId]: değer } biçiminde tek bir anahtarda tutulur. */
+const PATIENT_PLANS_KEY = "dp_patient_plans";
+const PATIENT_NOTES_KEY = "dp_patient_notes";
+const PATIENT_REMINDERS_KEY = "dp_patient_reminders";
+const mealGridKey = (patientId: number) => `dp_meal_grid_${patientId}`;
+
+const readPatientRecord = <T,>(key: string): Record<number, T> => {
+  try {
+    const raw = localStorage.getItem(key);
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<number, T>)
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+/** Danışanın kaydını yazar; `value` undefined ise kaydı siler. */
+const writePatientEntry = <T,>(key: string, patientId: number, value: T | undefined): void => {
+  try {
+    const all = readPatientRecord<T>(key);
+    if (value === undefined) {
+      delete all[patientId];
+    } else {
+      all[patientId] = value;
+    }
+    localStorage.setItem(key, JSON.stringify(all));
+  } catch {
+    // depolama kullanılamıyor / kota dolu — sessizce yoksay
+  }
+};
+
+/** Silinen danışanın tüm yerel kayıtlarını (ölçüm, plan, not, hatırlatma, öğün çizelgesi) temizler. */
+const removePatientLocalData = (patientId: number): void => {
+  [MEASUREMENTS_STORAGE_KEY, PATIENT_PLANS_KEY, PATIENT_NOTES_KEY, PATIENT_REMINDERS_KEY].forEach((key) => {
+    if (patientId in readPatientRecord(key)) {
+      writePatientEntry(key, patientId, undefined);
+    }
+  });
+  try {
+    localStorage.removeItem(mealGridKey(patientId));
+  } catch {
+    // depolama kullanılamıyor — yoksay
+  }
+};
+
 const getInitialMeasurements = (patientId: number): Measurement[] => {
   const stored = readStoredMeasurements()[patientId];
   if (stored) {
@@ -303,15 +366,6 @@ const AUTH_TOKEN_KEY = "dp_auth_token";
 const AUTH_USER_KEY = "dp_auth_user";
 const AUTH_EXPIRES_KEY = "dp_auth_expires_at";
 const DEFAULT_DURATION_MIN = 30;
-
-const MEAL_SCHEDULE: Array<[string, string]> = [
-  ["Kahvaltı", "09:00"],
-  ["Ara 1", "11:00"],
-  ["Öğle", "13:30"],
-  ["Ara 2", "16:30"],
-  ["Akşam", "19:30"],
-  ["Gece Ara", "22:30"]
-];
 
 const classNames = (...values: Array<string | false | null | undefined>) =>
   values.filter(Boolean).join(" ");
@@ -706,49 +760,107 @@ const PatientFormModal: React.FC<{
   );
 };
 
-const MealGrid: React.FC = () => {
-  const days = React.useMemo(() => Array.from({ length: 14 }, (_, i) => i + 1), []);
-  const meals = ["Kahvaltı", "Ara 1", "Öğle", "Ara 2", "Akşam"];
-  const completion = React.useMemo(
-    () =>
-      days.map(() =>
-        meals.map(() => ({
-          done: Math.random() > 0.3
-        }))
-      ),
-    [days, meals]
-  );
+const PLAN_DAYS = 14;
+const GRID_MEALS: Array<{ label: string; short: string }> = [
+  { label: "Kahvaltı", short: "K" },
+  { label: "Ara 1", short: "A1" },
+  { label: "Öğle", short: "Ö" },
+  { label: "Ara 2", short: "A2" },
+  { label: "Akşam", short: "A" }
+];
 
-  return (
-    <div className="table-scroll">
-      <table className="meal-grid">
-        <thead>
-          <tr>
-            <th>Gün</th>
-            {meals.map((meal) => (
-              <th key={meal}>{meal}</th>
+/** [gün][öğün] → tamamlandı mı */
+type MealGridState = boolean[][];
+
+const emptyMealGrid = (): MealGridState => Array.from({ length: PLAN_DAYS }, () => GRID_MEALS.map(() => false));
+
+const readMealGrid = (patientId: number): MealGridState => {
+  try {
+    const raw = localStorage.getItem(mealGridKey(patientId));
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(parsed)) {
+      return emptyMealGrid().map((row, day) =>
+        row.map((_, meal) => Array.isArray(parsed[day]) && (parsed[day] as unknown[])[meal] === true)
+      );
+    }
+  } catch {
+    // bozuk kayıt — boş çizelgeye düş
+  }
+  return emptyMealGrid();
+};
+
+const writeMealGrid = (patientId: number, grid: MealGridState): void => {
+  try {
+    localStorage.setItem(mealGridKey(patientId), JSON.stringify(grid));
+  } catch {
+    // depolama kullanılamıyor — yoksay
+  }
+};
+
+const todayIso = (): string => new Date().toISOString().slice(0, 10);
+
+const isoToUtc = (iso: string): number => {
+  const [year, month, day] = iso.split("-").map(Number);
+  return Date.UTC(year, (month || 1) - 1, day || 1);
+};
+
+const addDaysIso = (iso: string, days: number): string =>
+  new Date(isoToUtc(iso) + days * 86_400_000).toISOString().slice(0, 10);
+
+const daysBetweenIso = (from: string, to: string): number => Math.round((isoToUtc(to) - isoToUtc(from)) / 86_400_000);
+
+/** Plan başlangıcından bugüne geçen (çizelgede sorumlu tutulan) gün sayısı: 0–14. */
+const elapsedPlanDays = (startDate: string): number =>
+  Math.max(0, Math.min(PLAN_DAYS, daysBetweenIso(startDate, todayIso()) + 1));
+
+/** Geçen günlerdeki işaretli öğün oranı; henüz gün geçmediyse null. */
+const gridCompliance = (grid: MealGridState, elapsed: number): number | null => {
+  if (elapsed === 0) {
+    return null;
+  }
+  const due = grid.slice(0, elapsed);
+  const done = due.reduce((sum, row) => sum + row.filter(Boolean).length, 0);
+  return Math.round((done / (elapsed * GRID_MEALS.length)) * 100);
+};
+
+const MealGrid: React.FC<{
+  grid: MealGridState;
+  elapsed: number;
+  onToggle: (day: number, meal: number) => void;
+}> = ({ grid, elapsed, onToggle }) => (
+  <div className="table-scroll">
+    <table className="meal-grid">
+      <thead>
+        <tr>
+          <th>Gün</th>
+          {GRID_MEALS.map((meal) => (
+            <th key={meal.label}>{meal.label}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {grid.map((row, dayIndex) => (
+          <tr key={dayIndex}>
+            <td className={dayIndex < elapsed ? "value-strong" : "muted"}>{dayIndex + 1}</td>
+            {row.map((done, mealIndex) => (
+              <td key={GRID_MEALS[mealIndex].label}>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={done}
+                    onChange={() => onToggle(dayIndex, mealIndex)}
+                    aria-label={`Gün ${dayIndex + 1} ${GRID_MEALS[mealIndex].label}`}
+                  />
+                  <span className="muted">Tamamlandı</span>
+                </label>
+              </td>
             ))}
           </tr>
-        </thead>
-        <tbody>
-          {days.map((day, dayIndex) => (
-            <tr key={day}>
-              <td className="value-strong">{day}</td>
-              {meals.map((meal, mealIndex) => (
-                <td key={meal}>
-                  <label className="checkbox-row">
-                    <input type="checkbox" defaultChecked={completion[dayIndex][mealIndex].done} />
-                    <span className="muted">Tamamlandı</span>
-                  </label>
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-};
+        ))}
+      </tbody>
+    </table>
+  </div>
+);
 
 type MeasurementFormValues = {
   date: string;
@@ -976,13 +1088,28 @@ const MeasurementChart: React.FC<{ measurements: Measurement[] }> = ({ measureme
 
 const MeasurementEntryModal: React.FC<{
   initialHeight?: number;
+  /** Verilirse form bu ölçümü düzenler (kimliği korunur). */
+  initial?: Measurement;
   onClose: () => void;
   onSubmit: (measurement: Measurement) => void;
-}> = ({ initialHeight, onClose, onSubmit }) => {
-  const [values, setValues] = React.useState<MeasurementFormValues>(() => ({
-    ...EMPTY_MEASUREMENT_FORM,
-    heightCm: initialHeight ? String(initialHeight) : ""
-  }));
+}> = ({ initialHeight, initial, onClose, onSubmit }) => {
+  const [values, setValues] = React.useState<MeasurementFormValues>(() =>
+    initial
+      ? {
+          date: initial.date,
+          weightKg: String(initial.weightKg),
+          heightCm: String(initial.heightCm),
+          bodyFatPercentage: String(initial.bodyFatPercentage),
+          muscleMassKg: String(initial.muscleMassKg),
+          waistCm: String(initial.waistCm),
+          hipCm: String(initial.hipCm),
+          notes: initial.notes ?? ""
+        }
+      : {
+          ...EMPTY_MEASUREMENT_FORM,
+          heightCm: initialHeight ? String(initialHeight) : ""
+        }
+  );
   const [errors, setErrors] = React.useState<MeasurementFormErrors>({});
   const [touched, setTouched] = React.useState(false);
 
@@ -1000,7 +1127,8 @@ const MeasurementEntryModal: React.FC<{
     if (Object.keys(validation).length > 0) {
       return;
     }
-    onSubmit(toMeasurement(values));
+    const measurement = toMeasurement(values);
+    onSubmit(initial ? { ...measurement, id: initial.id } : measurement);
     onClose();
   };
 
@@ -1016,7 +1144,7 @@ const MeasurementEntryModal: React.FC<{
       <div className="modal" ref={dialogRef} onClick={(event) => event.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <h3 className="modal-title" id="measurement-modal-title">Yeni Ölçüm Ekle</h3>
+            <h3 className="modal-title" id="measurement-modal-title">{initial ? "Ölçümü Düzenle" : "Yeni Ölçüm Ekle"}</h3>
             <p className="muted">Seans ölçümünü kaydedin. Tüm sayısal alanlar zorunludur.</p>
           </div>
           <button className="btn btn-outline btn-small" onClick={onClose}>
@@ -1097,11 +1225,12 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
   const [measurements, setMeasurements] = React.useState<Measurement[]>(() =>
     getInitialMeasurements(patient.id)
   );
-  const [showModal, setShowModal] = React.useState(false);
+  /** null: kapalı · "new": yeni ölçüm · Measurement: düzenlenen kayıt */
+  const [modal, setModal] = React.useState<"new" | Measurement | null>(null);
 
   React.useEffect(() => {
     setMeasurements(getInitialMeasurements(patient.id));
-    setShowModal(false);
+    setModal(null);
   }, [patient.id]);
 
   const sorted = React.useMemo(
@@ -1113,10 +1242,27 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
   const latestBMI = latest ? calculateBMI(latest.weightKg, latest.heightCm) : 0;
   const latestCategory = latestBMI ? getBMICategory(latestBMI) : null;
 
-  const handleAdd = React.useCallback(
+  /** Yeni ölçümü ekler; aynı kimlik varsa (düzenleme) yerine yazar. */
+  const handleSave = React.useCallback(
     (measurement: Measurement) => {
       setMeasurements((prev) => {
-        const next = [...prev, measurement].sort((a, b) => a.date.localeCompare(b.date));
+        const next = [...prev.filter((m) => m.id !== measurement.id), measurement].sort((a, b) =>
+          a.date.localeCompare(b.date)
+        );
+        writeStoredMeasurements(patient.id, next);
+        return next;
+      });
+    },
+    [patient.id]
+  );
+
+  const handleDelete = React.useCallback(
+    (measurement: Measurement) => {
+      if (!window.confirm(`${measurement.date} tarihli ölçüm silinsin mi?`)) {
+        return;
+      }
+      setMeasurements((prev) => {
+        const next = prev.filter((m) => m.id !== measurement.id);
         writeStoredMeasurements(patient.id, next);
         return next;
       });
@@ -1143,7 +1289,7 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
               {latestCategory ? <span className="badge">{latestCategory}</span> : null}
             </div>
           ) : null}
-          <button className="btn btn-primary btn-small" onClick={() => setShowModal(true)}>
+          <button className="btn btn-primary btn-small" onClick={() => setModal("new")}>
             + Yeni Ölçüm
           </button>
         </div>
@@ -1170,6 +1316,7 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
                   <th>Bel</th>
                   <th>Kalça</th>
                   <th>Not</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -1188,6 +1335,16 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
                       <td>{m.waistCm} cm</td>
                       <td>{m.hipCm} cm</td>
                       <td className="muted">{m.notes || "—"}</td>
+                      <td style={{ textAlign: "right" }}>
+                        <div className="row-actions">
+                          <button className="btn btn-outline btn-small" onClick={() => setModal(m)}>
+                            Düzenle
+                          </button>
+                          <button className="icon-btn" aria-label={`${m.date} ölçümünü sil`} onClick={() => handleDelete(m)}>
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
@@ -1197,11 +1354,12 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
         )}
       </div>
 
-      {showModal ? (
+      {modal ? (
         <MeasurementEntryModal
           initialHeight={latest?.heightCm}
-          onClose={() => setShowModal(false)}
-          onSubmit={handleAdd}
+          initial={modal === "new" ? undefined : modal}
+          onClose={() => setModal(null)}
+          onSubmit={handleSave}
         />
       ) : null}
     </div>
@@ -1217,10 +1375,13 @@ const DRAWER_TABS: Array<{ key: DrawerTab; label: string; icon: React.ReactNode 
   { key: "bildirim", label: "Bildirimler & Notlar", icon: <Bell size={15} /> }
 ];
 
+type UpdatePatient = (patientId: number, patch: Partial<Omit<Patient, "id">>) => void;
+
 const PatientDetailDrawer: React.FC<{
   patient: Patient | null;
   onClose: () => void;
-}> = ({ patient, onClose }) => {
+  onUpdatePatient: UpdatePatient;
+}> = ({ patient, onClose, onUpdatePatient }) => {
   const [drawerTab, setDrawerTab] = React.useState<DrawerTab>("ozet");
   const [visible, setVisible] = React.useState(false);
 
@@ -1290,9 +1451,11 @@ const PatientDetailDrawer: React.FC<{
 
         <div className="drawer-body">
           {drawerTab === "ozet" ? <DrawerSummary patient={patient} /> : null}
-          {drawerTab === "plan" ? <DrawerPlanTab patient={patient} /> : null}
+          {drawerTab === "plan" ? (
+            <DrawerPlanTab key={patient.id} patient={patient} onUpdatePatient={onUpdatePatient} />
+          ) : null}
           {drawerTab === "olcum" ? <MeasurementsTab patient={patient} /> : null}
-          {drawerTab === "bildirim" ? <DrawerNotificationsTab patient={patient} /> : null}
+          {drawerTab === "bildirim" ? <DrawerNotificationsTab key={patient.id} patient={patient} /> : null}
         </div>
       </div>
     </div>
@@ -1306,6 +1469,17 @@ type PlanItem = {
   proteinG: number;
   carbsG: number;
   fatG: number;
+};
+
+/** Diyet planlayıcıda "Kaydet" ile danışana atanan plan (dp_patient_plans). */
+type SavedPatientPlan = {
+  templateName: string;
+  items: PlanItem[];
+  macros: MacroSplit;
+  notes: string;
+  repeat: { every: number; unit: string };
+  targetCalories: number;
+  savedAt: string;
 };
 
 const DEFAULT_PLAN_ITEMS: PlanItem[] = [
@@ -1325,6 +1499,10 @@ const escapeHtml = (value: string): string =>
     .replace(/'/g, "&#39;");
 
 const buildDietPrintHtml = (opts: {
+  /** Ayarlar > Profil: başlık, iletişim ve alt bilgi buradan gelir. */
+  clinic: ProfileSettings;
+  bmrFormulaLabel: string;
+  waterMl: number;
   dietitian: string;
   patient: string;
   templateName: string;
@@ -1352,6 +1530,18 @@ const buildDietPrintHtml = (opts: {
     )
     .join("");
 
+  const clinicName = opts.clinic.clinicName.trim() || "Diyetisyen Kliniği";
+  const contact = [
+    opts.clinic.title.trim(),
+    opts.clinic.diplomaNo.trim() ? `Diploma No: ${opts.clinic.diplomaNo.trim()}` : "",
+    opts.clinic.phone.trim(),
+    opts.clinic.email.trim()
+  ]
+    .filter(Boolean)
+    .map(escapeHtml)
+    .join(" · ");
+  const footerText = opts.clinic.footerText.trim() || "Bu liste bilgilendirme amaçlıdır.";
+
   return `<!doctype html>
 <html lang="tr">
 <head>
@@ -1376,7 +1566,7 @@ const buildDietPrintHtml = (opts: {
 </head>
 <body>
   <div class="brand">
-    <div><h1>NutriCare</h1><small>Diyetisyen Paneli · Kişisel Diyet Programı</small></div>
+    <div><h1>${escapeHtml(clinicName)}</h1><small>Kişisel Diyet Programı${contact ? ` · ${contact}` : ""}</small></div>
     <div><small>${escapeHtml(opts.date)}</small></div>
   </div>
   <div class="meta">
@@ -1385,7 +1575,8 @@ const buildDietPrintHtml = (opts: {
     <div><strong>Program</strong>${escapeHtml(opts.templateName)}</div>
   </div>
   <div class="targets">
-    Hedef: <strong>${opts.targetCalories} kcal/gün</strong> (BMR ${opts.bmr} · TDEE ${opts.tdee}) ·
+    Hedef: <strong>${opts.targetCalories} kcal/gün</strong> (BMR ${opts.bmr} · ${escapeHtml(opts.bmrFormulaLabel)} · TDEE ${opts.tdee}) ·
+    Su: ${(opts.waterMl / 1000).toFixed(1)} L/gün ·
     Karbonhidrat %${opts.macros.carbsPct} (${opts.macroGrams.carbsG} g) ·
     Protein %${opts.macros.proteinPct} (${opts.macroGrams.proteinG} g) ·
     Yağ %${opts.macros.fatPct} (${opts.macroGrams.fatG} g)
@@ -1396,7 +1587,7 @@ const buildDietPrintHtml = (opts: {
     <tfoot><tr class="totals"><td></td><td>Toplam</td><td>${opts.totals.calories} kcal</td><td>${opts.totals.proteinG} g</td><td>${opts.totals.carbsG} g</td><td>${opts.totals.fatG} g</td></tr></tfoot>
   </table>
   ${opts.notes ? `<div class="notes"><strong>Notlar:</strong> ${escapeHtml(opts.notes)}</div>` : ""}
-  <footer>Bu liste bilgilendirme amaçlıdır · ${escapeHtml(opts.dietitian)} · NutriCare</footer>
+  <footer>${escapeHtml(footerText)} · ${escapeHtml(opts.dietitian)} · ${escapeHtml(clinicName)}</footer>
 </body>
 </html>`;
 };
@@ -1435,7 +1626,12 @@ const TargetBar: React.FC<{
   );
 };
 
-const DnDPlanEditor: React.FC<{ patients: Patient[] }> = ({ patients }) => {
+const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePatient }> = ({
+  patients,
+  onUpdatePatient
+}) => {
+  // Klinik ayarları sekme açılırken bir kez okunur (Ayarlar ayrı sekmede düzenlenir).
+  const clinic = React.useMemo(() => loadSettings(), []);
   const [items, setItems] = usePersistentState<PlanItem[]>("dp_plan_items", DEFAULT_PLAN_ITEMS);
   const [repeat, setRepeat] = usePersistentState("dp_plan_repeat", { every: 14, unit: "day" });
   const [templateName, setTemplateName] = usePersistentState("dp_plan_name", "2 Haftalık Fit Plan");
@@ -1456,12 +1652,21 @@ const DnDPlanEditor: React.FC<{ patients: Patient[] }> = ({ patients }) => {
   });
   const [activity, setActivity] = usePersistentState<ActivityLevel>("dp_plan_activity", "orta");
   const [goal, setGoal] = usePersistentState<WeightGoal>("dp_plan_goal", "verme");
-  const [macros, setMacros] = usePersistentState<MacroSplit>("dp_plan_macros", GOAL_ADJUSTMENTS.verme.macros);
+  // İlk açılışta makrolar ayarlardaki varsayılan dağılımdan gelir.
+  const [macros, setMacros] = usePersistentState<MacroSplit>("dp_plan_macros", () => {
+    const { macroPresetId, customMacros } = clinic.nutrition;
+    const preset = MACRO_PRESETS.find((item) => item.id === macroPresetId);
+    const source = macroPresetId === "custom" || !preset ? customMacros : preset;
+    return { carbsPct: source.carbsPct, proteinPct: source.proteinPct, fatPct: source.fatPct };
+  });
+  const [savedMsg, setSavedMsg] = React.useState<string | null>(null);
 
+  const bmrFormula = clinic.nutrition.bmrFormula;
   const targets = React.useMemo(
-    () => calculateTargets(profile, activity, goal, macros),
-    [profile, activity, goal, macros]
+    () => calculateTargets(profile, activity, goal, macros, bmrFormula),
+    [profile, activity, goal, macros, bmrFormula]
   );
+  const waterMl = Math.round(Math.max(0, profile.weightKg) * clinic.nutrition.hydrationMlPerKg);
 
   const totals = React.useMemo(
     () =>
@@ -1527,6 +1732,9 @@ const DnDPlanEditor: React.FC<{ patients: Patient[] }> = ({ patients }) => {
   const handlePdfExport = () => {
     const patient = patients.find((p) => p.id === patientId);
     const html = buildDietPrintHtml({
+      clinic: clinic.profile,
+      bmrFormulaLabel: BMR_FORMULA_LABELS[bmrFormula],
+      waterMl,
       dietitian: dietitian.trim() || "Uzm. Diyetisyen",
       patient: patient?.name ?? "Danışan",
       templateName: templateName.trim() || "Diyet Programı",
@@ -1569,6 +1777,27 @@ const DnDPlanEditor: React.FC<{ patients: Patient[] }> = ({ patients }) => {
     }, 100);
   };
 
+  const handleSavePlan = () => {
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) {
+      setSavedMsg("Kaydetmek için bir danışan seçin.");
+      return;
+    }
+    const name = templateName.trim() || "Diyet Programı";
+    const plan: SavedPatientPlan = {
+      templateName: name,
+      items,
+      macros,
+      notes: notes.trim(),
+      repeat,
+      targetCalories: targets.targetCalories,
+      savedAt: new Date().toISOString()
+    };
+    writePatientEntry(PATIENT_PLANS_KEY, patient.id, plan);
+    onUpdatePatient(patient.id, { plan: name, lastAction: `Plan kaydedildi · ${new Date().toLocaleDateString("tr-TR")}` });
+    setSavedMsg(`"${name}" ${patient.name} için kaydedildi.`);
+  };
+
   const setProfileField = (key: keyof BmrInput) => (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const raw = event.target.value;
     setProfile((prev) => ({
@@ -1584,7 +1813,9 @@ const DnDPlanEditor: React.FC<{ patients: Patient[] }> = ({ patients }) => {
           <h3>
             <Calculator size={15} /> BMR & Hedef Kalori Hesaplayıcı
           </h3>
-          <span className="badge badge-emerald">Mifflin-St Jeor</span>
+          <span className="badge badge-emerald" title="Ayarlar > Beslenme bölümünden değiştirilebilir">
+            {BMR_FORMULA_LABELS[bmrFormula]}
+          </span>
         </div>
         <div className="calc-grid">
           <div>
@@ -1641,6 +1872,10 @@ const DnDPlanEditor: React.FC<{ patients: Patient[] }> = ({ patients }) => {
           <div className="calc-chip calc-chip-primary">
             <span className="muted">Günlük Hedef</span>
             <strong>{targets.targetCalories} kcal</strong>
+          </div>
+          <div className="calc-chip" title={`${clinic.nutrition.hydrationMlPerKg} ml/kg`}>
+            <span className="muted">Su Hedefi</span>
+            <strong>{(waterMl / 1000).toFixed(1)} L</strong>
           </div>
           <div className="macro-edit">
             <div>
@@ -1796,10 +2031,15 @@ const DnDPlanEditor: React.FC<{ patients: Patient[] }> = ({ patients }) => {
               <button className="btn btn-primary" onClick={handlePdfExport}>
                 <Printer size={15} /> Diyet Listesini PDF İndir
               </button>
-              <button className="btn btn-outline">
+              <button className="btn btn-outline" onClick={handleSavePlan}>
                 <FileText size={15} /> Kaydet
               </button>
             </div>
+            {savedMsg ? (
+              <p className="muted" role="status">
+                {savedMsg}
+              </p>
+            ) : null}
           </div>
         </div>
       </div>
@@ -1865,6 +2105,9 @@ type AppointmentStatus = "Onaylı" | "Bekliyor";
 
 type Appointment = {
   id: string;
+  /** Danışan kimliği; eski kayıtlarda yoksa ada göre eşleştirilir. */
+  patientId?: number;
+  /** Görünen ad (danışan adı değişince güncellenir). */
   patient: string;
   date: string; // ISO YYYY-MM-DD
   time: string; // HH:MM
@@ -1876,11 +2119,15 @@ const APPOINTMENT_TYPES = ["Kontrol / Ölçüm", "Online Görüşme", "Plan Revi
 const APPOINTMENT_STATUSES: AppointmentStatus[] = ["Onaylı", "Bekliyor"];
 
 const SEED_APPOINTMENTS: Appointment[] = [
-  { id: "r1", patient: "Barış Karapelit", date: "2025-11-12", time: "10:30", type: "Kontrol / Ölçüm", status: "Onaylı" },
-  { id: "r2", patient: "Elif Y.", date: "2025-11-12", time: "11:30", type: "Online Görüşme", status: "Bekliyor" },
-  { id: "r3", patient: "Meriç B.", date: "2025-11-13", time: "14:00", type: "Plan Revizyonu", status: "Onaylı" },
-  { id: "r4", patient: "Elif Y.", date: "2025-11-15", time: "09:30", type: "Kontrol / Ölçüm", status: "Bekliyor" }
+  { id: "r1", patientId: 1, patient: "Barış Karapelit", date: "2025-11-12", time: "10:30", type: "Kontrol / Ölçüm", status: "Onaylı" },
+  { id: "r2", patientId: 2, patient: "Elif Y.", date: "2025-11-12", time: "11:30", type: "Online Görüşme", status: "Bekliyor" },
+  { id: "r3", patientId: 3, patient: "Meriç B.", date: "2025-11-13", time: "14:00", type: "Plan Revizyonu", status: "Onaylı" },
+  { id: "r4", patientId: 2, patient: "Elif Y.", date: "2025-11-15", time: "09:30", type: "Kontrol / Ölçüm", status: "Bekliyor" }
 ];
+
+/** Randevu bu danışana mı ait? Kimlik varsa ona, yoksa (eski kayıt) ada bakılır. */
+const isAppointmentOf = (appt: Appointment, patient: Pick<Patient, "id" | "name">): boolean =>
+  appt.patientId !== undefined ? appt.patientId === patient.id : appt.patient === patient.name;
 
 const APPOINTMENTS_STORAGE_KEY = "dp_appointments";
 
@@ -1901,10 +2148,7 @@ const readStoredAppointments = (): Appointment[] => {
   }
 };
 
-/**
- * Danışan adı değiştiğinde/silindiğinde kayıtlı randevuları günceller.
- * Randevular danışanı adıyla tuttuğu için bu olmadan yetim kayıtlar kalır.
- */
+/** Danışan adı değiştiğinde/silindiğinde kayıtlı randevuları günceller (yetim kayıt kalmasın). */
 const updateStoredAppointments = (update: (appointments: Appointment[]) => Appointment[]): void => {
   try {
     localStorage.setItem(APPOINTMENTS_STORAGE_KEY, JSON.stringify(update(readStoredAppointments())));
@@ -2012,6 +2256,8 @@ const TopHeader: React.FC<{
     SEED_NOTIFICATIONS
   );
   const headerRef = React.useRef<HTMLDivElement>(null);
+  // Unvan Ayarlar > Profil'den; ayar kaydedildiğinde bir sonraki çizimde güncellenir.
+  const profileTitle = loadSettings().profile.title.trim() || "Diyetisyen";
 
   const dismissNotification = React.useCallback(
     (id: string) => setNotifications((prev) => prev.filter((item) => item.id !== id)),
@@ -2119,7 +2365,7 @@ const TopHeader: React.FC<{
           </span>
           <span className="profile-meta">
             <strong>{user ?? "Diyetisyen"}</strong>
-            <small>Uzman Diyetisyen</small>
+            <small>{profileTitle}</small>
           </span>
         </button>
         {showProfile ? (
@@ -2128,7 +2374,7 @@ const TopHeader: React.FC<{
               <span className="avatar avatar-emerald">{(user ?? "D").charAt(0).toUpperCase()}</span>
               <div>
                 <strong>{user ?? "Diyetisyen"}</strong>
-                <p className="muted">Uzman Diyetisyen</p>
+                <p className="muted">{profileTitle}</p>
               </div>
             </div>
             <div className="popover-actions">
@@ -2157,28 +2403,88 @@ const TopHeader: React.FC<{
 
 type AppointmentDraft = Omit<Appointment, "id">;
 
+const DAY_NAMES_TR = ["Pazar", "Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi"];
+
+const timeToMinutes = (hhmm: string): number => {
+  const [hours, minutes] = hhmm.split(":").map(Number);
+  return (hours || 0) * 60 + (minutes || 0);
+};
+
+/**
+ * Ayarlar > Çalışma Saatleri'ne göre randevu doğrulaması: kapalı gün, çalışma aralığı dışı
+ * ve diğer randevularla (seans süresi + tampon) çakışma. Boş dizi = uygun.
+ */
+const validateAppointmentSlot = (
+  draft: Pick<AppointmentDraft, "date" | "time">,
+  others: Appointment[],
+  schedule: ScheduleSettings
+): string[] => {
+  if (!draft.date || !isValidTime(draft.time)) {
+    return [];
+  }
+  const errors: string[] = [];
+  const dayName = DAY_NAMES_TR[new Date(isoToUtc(draft.date)).getUTCDay()];
+  const workingDay = schedule.workingDays.find((day) => day.day === dayName);
+  const duration = schedule.defaultDurationMin;
+  const start = timeToMinutes(draft.time);
+
+  if (!workingDay || !workingDay.enabled) {
+    errors.push(`${dayName} günü klinik kapalı.`);
+  } else if (start < timeToMinutes(workingDay.start) || start + duration > timeToMinutes(workingDay.end)) {
+    errors.push(
+      `${dayName} çalışma saatleri ${workingDay.start}–${workingDay.end}; ${duration} dk'lık seans bu aralığa sığmıyor.`
+    );
+  }
+
+  const gap = duration + schedule.bufferMin;
+  const clash = others.find(
+    (other) => other.date === draft.date && Math.abs(timeToMinutes(other.time) - start) < gap
+  );
+  if (clash) {
+    errors.push(
+      `${clash.time} ${clash.patient} randevusuyla çakışıyor (seans ${duration} dk + ${schedule.bufferMin} dk tampon).`
+    );
+  }
+  return errors;
+};
+
 const AppointmentFormModal: React.FC<{
   patients: Patient[];
+  /** Çakışma kontrolü için mevcut randevular (düzenlenen kayıt hariç). */
+  others: Appointment[];
   initial?: Appointment;
   onClose: () => void;
   onSubmit: (draft: AppointmentDraft) => void;
-}> = ({ patients, initial, onClose, onSubmit }) => {
+}> = ({ patients, others, initial, onClose, onSubmit }) => {
   const dialogRef = useModalDismiss(onClose);
-  const [values, setValues] = React.useState<AppointmentDraft>(() => ({
-    patient: initial?.patient ?? patients[0]?.name ?? "",
-    date: initial?.date ?? new Date().toISOString().slice(0, 10),
-    time: initial?.time ?? "10:00",
-    type: initial?.type ?? APPOINTMENT_TYPES[0],
-    status: initial?.status ?? "Bekliyor"
-  }));
+  const schedule = React.useMemo(() => loadSettings().schedule, []);
+  const [values, setValues] = React.useState<AppointmentDraft>(() => {
+    const initialPatient = initial
+      ? patients.find((patient) => (initial.patientId !== undefined ? patient.id === initial.patientId : patient.name === initial.patient))
+      : patients[0];
+    return {
+      patientId: initialPatient?.id,
+      patient: initialPatient?.name ?? "",
+      date: initial?.date ?? todayIso(),
+      time: initial?.time ?? "10:00",
+      type: initial?.type ?? APPOINTMENT_TYPES[0],
+      status: initial?.status ?? "Bekliyor"
+    };
+  });
   const [touched, setTouched] = React.useState(false);
 
   const setField = <K extends keyof AppointmentDraft>(key: K) => (
     event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
   ) => setValues((prev) => ({ ...prev, [key]: event.target.value }));
 
-  const invalid = !values.patient || !values.date || !values.time;
-  const isPastDate = Boolean(values.date) && values.date < new Date().toISOString().slice(0, 10);
+  const setPatient = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    const patient = patients.find((item) => item.id === Number(event.target.value));
+    setValues((prev) => ({ ...prev, patientId: patient?.id, patient: patient?.name ?? "" }));
+  };
+
+  const slotErrors = validateAppointmentSlot(values, others, schedule);
+  const invalid = values.patientId === undefined || !values.date || !values.time || slotErrors.length > 0;
+  const isPastDate = Boolean(values.date) && values.date < todayIso();
 
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -2204,13 +2510,13 @@ const AppointmentFormModal: React.FC<{
           <div className="form-grid">
             <div>
               <label className="label" htmlFor="a-patient">Danışan *</label>
-              <select id="a-patient" className="input" value={values.patient} onChange={setField("patient")}>
-                {patients.length === 0 ? <option value="">Hasta yok</option> : null}
+              <select id="a-patient" className="input" value={values.patientId ?? ""} onChange={setPatient}>
+                {values.patientId === undefined ? <option value="">{patients.length === 0 ? "Hasta yok" : "Danışan seçin"}</option> : null}
                 {patients.map((patient) => (
-                  <option key={patient.id} value={patient.name}>{patient.name}</option>
+                  <option key={patient.id} value={patient.id}>{patient.name}</option>
                 ))}
               </select>
-              {touched && !values.patient ? <p className="field-error">Danışan seçin.</p> : null}
+              {touched && values.patientId === undefined ? <p className="field-error">Danışan seçin.</p> : null}
             </div>
             <div>
               <label className="label" htmlFor="a-type">Tür</label>
@@ -2234,6 +2540,13 @@ const AppointmentFormModal: React.FC<{
               <input id="a-time" type="time" className="input" value={values.time} onChange={setField("time")} />
               {touched && !values.time ? <p className="field-error">Saat girin.</p> : null}
             </div>
+            {slotErrors.length > 0 ? (
+              <div className="form-full" role="alert">
+                {slotErrors.map((message) => (
+                  <p key={message} className="field-error">{message}</p>
+                ))}
+              </div>
+            ) : null}
             <div>
               <label className="label" htmlFor="a-status">Durum</label>
               <select id="a-status" className="input" value={values.status} onChange={setField("status")}>
@@ -2258,17 +2571,40 @@ const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ pa
   const [modalOpen, setModalOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Appointment | null>(null);
 
+  // Eski (yalnızca ad tutan) kayıtlara danışan kimliğini bir kez ekle.
+  React.useEffect(() => {
+    if (appointments.every((appt) => appt.patientId !== undefined)) {
+      return;
+    }
+    setAppointments((prev) =>
+      prev.map((appt) =>
+        appt.patientId !== undefined
+          ? appt
+          : { ...appt, patientId: patients.find((patient) => patient.name === appt.patient)?.id }
+      )
+    );
+    // Yalnızca açılışta çalışması yeterli.
+  }, []);
+
+  /** Görünen ad: danışan kimliği varsa güncel kayıttan, yoksa randevudaki addan. */
+  const displayName = React.useCallback(
+    (appt: Appointment) =>
+      (appt.patientId !== undefined ? patients.find((patient) => patient.id === appt.patientId)?.name : undefined) ??
+      appt.patient,
+    [patients]
+  );
+
   const sorted = React.useMemo(() => {
     const lower = query.trim().toLowerCase();
     return [...appointments]
       .filter(
         (appt) =>
           !lower ||
-          appt.patient.toLowerCase().includes(lower) ||
+          displayName(appt).toLowerCase().includes(lower) ||
           appt.type.toLowerCase().includes(lower)
       )
       .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
-  }, [appointments, query]);
+  }, [appointments, query, displayName]);
 
   const openAdd = () => {
     setEditing(null);
@@ -2324,7 +2660,7 @@ const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ pa
             <tbody>
               {sorted.map((appt) => (
                 <tr key={appt.id}>
-                  <td style={{ fontWeight: 600 }}>{appt.patient}</td>
+                  <td style={{ fontWeight: 600 }}>{displayName(appt)}</td>
                   <td>{appt.date}</td>
                   <td>{appt.time}</td>
                   <td>{appt.type}</td>
@@ -2351,6 +2687,7 @@ const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ pa
       {modalOpen ? (
         <AppointmentFormModal
           patients={patients}
+          others={appointments.filter((appt) => appt.id !== editing?.id)}
           initial={editing ?? undefined}
           onClose={() => setModalOpen(false)}
           onSubmit={handleSubmit}
@@ -2420,76 +2757,222 @@ const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
   );
 };
 
-const DrawerPlanTab: React.FC<{ patient: Patient }> = ({ patient }) => (
-  <div className="drawer-stack">
-    <div className="card">
-      <h3><UtensilsCrossed size={15} /> 14 Günlük Çizelge</h3>
-      <MealGrid />
-    </div>
-    <div className="card">
-      <h3><ChefHat size={15} /> Plan Atama</h3>
-      <div className="drawer-plan-grid">
-        <div>
-          <label className="label">Plan Şablonu</label>
-          <select className="input">
-            <option>2 Haftalık Fit Plan</option>
-            <option>Düşük Karbonhidrat</option>
-            <option>Glütensiz 14G</option>
-          </select>
+const BASE_PLAN_TEMPLATES = ["2 Haftalık Fit Plan", "Düşük Karbonhidrat", "Glütensiz 14G"];
+
+const DrawerPlanTab: React.FC<{ patient: Patient; onUpdatePatient: UpdatePatient }> = ({
+  patient,
+  onUpdatePatient
+}) => {
+  const [grid, setGrid] = React.useState<MealGridState>(() => readMealGrid(patient.id));
+  const elapsed = elapsedPlanDays(patient.startDate);
+  const compliance = gridCompliance(grid, elapsed);
+
+  const templates = React.useMemo(() => {
+    const saved = Object.values(readPatientRecord<SavedPatientPlan>(PATIENT_PLANS_KEY)).map((plan) => plan.templateName);
+    return Array.from(new Set([patient.plan, ...saved, ...BASE_PLAN_TEMPLATES])).filter(
+      (name) => name && name !== "Plan atanmadı"
+    );
+  }, [patient.plan]);
+
+  const [planName, setPlanName] = React.useState(() => templates[0] ?? BASE_PLAN_TEMPLATES[0]);
+  const [startDate, setStartDate] = React.useState(patient.startDate);
+  const [cycleDays, setCycleDays] = React.useState(() =>
+    String(Math.max(1, daysBetweenIso(patient.startDate, patient.endDate)) || PLAN_DAYS)
+  );
+  const [assignMsg, setAssignMsg] = React.useState<{ ok: boolean; text: string } | null>(null);
+
+  const handleToggle = (day: number, meal: number) => {
+    const next = grid.map((row, d) => (d === day ? row.map((done, m) => (m === meal ? !done : done)) : row));
+    setGrid(next);
+    writeMealGrid(patient.id, next);
+    // Çizelge uyumun kaynağıdır: yalnızca geçen günler hesaba katılır.
+    const nextCompliance = gridCompliance(next, elapsed);
+    if (nextCompliance !== null) {
+      onUpdatePatient(patient.id, { compliance: nextCompliance, lastAction: "Öğün çizelgesi güncellendi" });
+    }
+  };
+
+  const handleAssign = () => {
+    const cycle = Number(cycleDays);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+      setAssignMsg({ ok: false, text: "Geçerli bir başlangıç tarihi seçin." });
+      return;
+    }
+    if (!Number.isInteger(cycle) || cycle < 1 || cycle > 365) {
+      setAssignMsg({ ok: false, text: "Döngü 1–365 gün arasında olmalıdır." });
+      return;
+    }
+    const newPeriod = startDate !== patient.startDate;
+    const hasMarks = grid.some((row) => row.some(Boolean));
+    if (newPeriod && hasMarks && !window.confirm("Yeni plan dönemi başlıyor; öğün çizelgesi sıfırlansın mı?")) {
+      return;
+    }
+    if (newPeriod) {
+      const empty = emptyMealGrid();
+      setGrid(empty);
+      writeMealGrid(patient.id, empty);
+    }
+    const endDate = addDaysIso(startDate, cycle);
+    onUpdatePatient(patient.id, { plan: planName, startDate, endDate, lastAction: "Plan atandı" });
+    setAssignMsg({ ok: true, text: `${planName} atandı: ${startDate} → ${endDate}` });
+  };
+
+  // Son 7 gün: plan başlangıcından bugüne kadar geçen günlerin son yedisi.
+  const weekStart = Math.max(0, elapsed - 7);
+  const weekDays = grid.slice(weekStart, elapsed);
+
+  return (
+    <div className="drawer-stack">
+      <div className="card">
+        <div className="card-head">
+          <h3><UtensilsCrossed size={15} /> 14 Günlük Çizelge</h3>
+          <span className="muted">
+            {compliance === null ? "Plan henüz başlamadı" : `Çizelgeye göre uyum %${compliance} · ${elapsed}/${PLAN_DAYS} gün`}
+          </span>
         </div>
-        <div>
-          <label className="label">Başlangıç Tarihi</label>
-          <input type="date" className="input" defaultValue={patient.startDate} />
-        </div>
-        <div>
-          <label className="label">Döngü (gün)</label>
-          <input type="number" className="input" defaultValue={14} />
-        </div>
-        <div className="drawer-plan-action">
-          <button className="btn btn-primary">Ata / Güncelle</button>
-        </div>
+        <MealGrid grid={grid} elapsed={elapsed} onToggle={handleToggle} />
       </div>
-    </div>
-    <div className="card">
-      <h3>Öğün Günlüğü (Son 7 Gün)</h3>
-      <div className="drawer-week-grid">
-        {Array.from({ length: 7 }, (_, index) => (
-          <div key={index} className="week-chip">
-            <p className="muted">Gün {index + 1}</p>
-            <div className="week-chip-grid">
-              {["K", "A1", "Ö", "A2", "A"].map((meal) => (
-                <span key={meal} className="week-chip-cell">
-                  {meal} <CheckCircle2 size={12} className="text-good" />
-                </span>
+      <div className="card">
+        <h3><ChefHat size={15} /> Plan Atama</h3>
+        <div className="drawer-plan-grid">
+          <div>
+            <label className="label" htmlFor="dp-plan">Plan Şablonu</label>
+            <select id="dp-plan" className="input" value={planName} onChange={(event) => setPlanName(event.target.value)}>
+              {templates.map((name) => (
+                <option key={name} value={name}>{name}</option>
               ))}
-            </div>
+            </select>
           </div>
-        ))}
+          <div>
+            <label className="label" htmlFor="dp-start">Başlangıç Tarihi</label>
+            <input id="dp-start" type="date" className="input" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+          </div>
+          <div>
+            <label className="label" htmlFor="dp-cycle">Döngü (gün)</label>
+            <input id="dp-cycle" type="number" min={1} max={365} className="input" value={cycleDays} onChange={(event) => setCycleDays(event.target.value)} />
+          </div>
+          <div className="drawer-plan-action">
+            <button type="button" className="btn btn-primary" onClick={handleAssign}>Ata / Güncelle</button>
+          </div>
+        </div>
+        {assignMsg ? (
+          <p className={classNames("muted-spaced", assignMsg.ok ? "import-ok" : "field-error")} role="status">
+            {assignMsg.text}
+          </p>
+        ) : null}
+      </div>
+      <div className="card">
+        <h3>Öğün Günlüğü (Son 7 Gün)</h3>
+        {weekDays.length === 0 ? (
+          <p className="muted">Plan henüz başlamadı — başlangıç: {patient.startDate}.</p>
+        ) : (
+          <div className="drawer-week-grid">
+            {weekDays.map((row, index) => (
+              <div key={weekStart + index} className="week-chip">
+                <p className="muted">Gün {weekStart + index + 1}</p>
+                <div className="week-chip-grid">
+                  {row.map((done, mealIndex) => (
+                    <span key={GRID_MEALS[mealIndex].short} className="week-chip-cell">
+                      {GRID_MEALS[mealIndex].short}{" "}
+                      {done ? (
+                        <CheckCircle2 size={12} className="text-good" aria-label="tamamlandı" />
+                      ) : (
+                        <X size={12} className="text-bad" aria-label="tamamlanmadı" />
+                      )}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
-  </div>
-);
+  );
+};
+
+/** Hatırlatma slotu kimliği → "HH:MM" (danışana özel saatler). */
+type ReminderTimes = Record<string, string>;
+
+const NOTE_MAX_LENGTH = 2000;
+
+const SEVERITY_BADGE: Record<PatientAlert["severity"], string> = {
+  critical: "badge-rose",
+  warning: "badge-amber",
+  info: "badge-slate"
+};
 
 const DrawerNotificationsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
-  const [notes, setNotes] = React.useState(
-    `${patient.name} için seans notu: uyum takibi ve ölçüm hedefleri gözden geçirildi.`
-  );
-  const [saved, setSaved] = React.useState(false);
+  const slots = React.useMemo(() => loadSettings().notifications.reminderSlots, []);
+  const [times, setTimes] = React.useState<ReminderTimes>(() => {
+    const saved = readPatientRecord<ReminderTimes>(PATIENT_REMINDERS_KEY)[patient.id] ?? {};
+    return Object.fromEntries(
+      slots.map((slot) => [slot.id, typeof saved[slot.id] === "string" ? saved[slot.id] : slot.time])
+    );
+  });
+  const [reminderMsg, setReminderMsg] = React.useState<{ ok: boolean; text: string } | null>(null);
+
+  const storedNote = React.useMemo(() => readPatientRecord<string>(PATIENT_NOTES_KEY)[patient.id], [patient.id]);
+  const [notes, setNotes] = React.useState(storedNote ?? "");
+  const [saved, setSaved] = React.useState(storedNote !== undefined);
+
+  const alerts = React.useMemo(() => {
+    const dismissed = new Set(loadDismissedIds());
+    return buildAlerts(
+      [{ id: patient.id, name: patient.name, plan: patient.plan, compliance: patient.compliance, status: patient.status, endDate: patient.endDate }],
+      getInitialMeasurements,
+      loadAlertRules(rulesFromClinicSettings()),
+      loadResolvedIds()
+    ).filter((alert) => !dismissed.has(alert.id));
+  }, [patient]);
+
+  const saveReminders = () => {
+    const invalid = slots.find((slot) => !isValidTime(times[slot.id] ?? ""));
+    if (invalid) {
+      setReminderMsg({ ok: false, text: `${invalid.label} saati HH:MM formatında olmalı.` });
+      return;
+    }
+    writePatientEntry(PATIENT_REMINDERS_KEY, patient.id, times);
+    setReminderMsg({ ok: true, text: "Bildirim saatleri kaydedildi." });
+  };
+
+  const saveNote = () => {
+    writePatientEntry(PATIENT_NOTES_KEY, patient.id, notes.trim() ? notes : undefined);
+    setSaved(true);
+  };
 
   return (
     <div className="drawer-stack">
       <div className="card">
         <h3><Bell size={15} /> Bildirim Saatleri</h3>
         <div className="drawer-form">
-          {MEAL_SCHEDULE.map(([labelText, time]) => (
-            <div key={labelText} className="drawer-form-row">
-              <label className="label">{labelText}</label>
-              <input className="input" defaultValue={time} />
-            </div>
-          ))}
+          {slots.length === 0 ? (
+            <p className="muted">Ayarlar &gt; Bildirimler bölümünde hatırlatma saati tanımlı değil.</p>
+          ) : (
+            slots.map((slot) => (
+              <div key={slot.id} className="drawer-form-row">
+                <label className="label" htmlFor={`rem-${slot.id}`}>{slot.label}</label>
+                <input
+                  id={`rem-${slot.id}`}
+                  type="time"
+                  className="input"
+                  value={times[slot.id] ?? ""}
+                  onChange={(event) => {
+                    setTimes((prev) => ({ ...prev, [slot.id]: event.target.value }));
+                    setReminderMsg(null);
+                  }}
+                />
+              </div>
+            ))
+          )}
           <div>
-            <button className="btn btn-primary btn-small">Kaydet</button>
+            <button type="button" className="btn btn-primary btn-small" onClick={saveReminders} disabled={slots.length === 0}>
+              Kaydet
+            </button>
           </div>
+          {reminderMsg ? (
+            <p className={reminderMsg.ok ? "import-ok" : "field-error"} role="status">{reminderMsg.text}</p>
+          ) : null}
         </div>
       </div>
       <div className="card">
@@ -2497,6 +2980,8 @@ const DrawerNotificationsTab: React.FC<{ patient: Patient }> = ({ patient }) => 
         <textarea
           className="input"
           rows={4}
+          maxLength={NOTE_MAX_LENGTH}
+          placeholder={`${patient.name} için seans notu...`}
           value={notes}
           onChange={(event) => {
             setNotes(event.target.value);
@@ -2504,18 +2989,30 @@ const DrawerNotificationsTab: React.FC<{ patient: Patient }> = ({ patient }) => 
           }}
         />
         <div className="card-actions card-actions-spaced">
-          <span className="muted">{saved ? "Kaydedildi." : "Taslak düzenleniyor..."}</span>
-          <button className="btn btn-primary btn-small" onClick={() => setSaved(true)}>
+          <span className="muted">{saved ? "Kaydedildi." : "Kaydedilmemiş değişiklik var."}</span>
+          <button type="button" className="btn btn-primary btn-small" onClick={saveNote} disabled={saved}>
             Notu Kaydet
           </button>
         </div>
       </div>
       <div className="card">
         <h3>Uyarı Geçmişi</h3>
-        <ul className="scenario-list">
-          <li><span>Uyum %60 altına düştü → e-posta gönderildi</span><span className="badge badge-amber">Takipte</span></li>
-          <li><span>48 saatte 3 öğün kaçtı → push bildirimi</span><span className="badge badge-emerald">Çözüldü</span></li>
-        </ul>
+        {alerts.length === 0 ? (
+          <p className="muted">Bu danışan için güncel uyarı yok.</p>
+        ) : (
+          <ul className="scenario-list">
+            {alerts.map((alert) => (
+              <li key={alert.id}>
+                <span>
+                  {alert.title} — <span className="muted">{alert.description}</span>
+                </span>
+                <span className={classNames("badge", alert.isResolved ? "badge-emerald" : SEVERITY_BADGE[alert.severity])}>
+                  {alert.isResolved ? "Çözüldü" : SEVERITY_META[alert.severity].label}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );
@@ -2741,9 +3238,11 @@ const App: React.FC = () => {
   const handleSavePatient = React.useCallback(
     (draft: PatientDraft) => {
       if (editingPatient && editingPatient.name !== draft.name) {
-        const oldName = editingPatient.name;
+        const target = editingPatient;
         updateStoredAppointments((appointments) =>
-          appointments.map((appt) => (appt.patient === oldName ? { ...appt, patient: draft.name } : appt))
+          appointments.map((appt) =>
+            isAppointmentOf(appt, target) ? { ...appt, patientId: target.id, patient: draft.name } : appt
+          )
         );
       }
       setPatients((prev) => {
@@ -2757,6 +3256,14 @@ const App: React.FC = () => {
       });
     },
     [editingPatient, setPatients]
+  );
+
+  /** Çekmece ve diyet planlayıcıdan gelen kısmi güncellemeler (plan ataması, uyum vb.). */
+  const handleUpdatePatient = React.useCallback(
+    (patientId: number, patch: Partial<Omit<Patient, "id">>) => {
+      setPatients((prev) => prev.map((patient) => (patient.id === patientId ? { ...patient, ...patch } : patient)));
+    },
+    [setPatients]
   );
 
   const handleAssignPlan = React.useCallback(
@@ -2773,21 +3280,16 @@ const App: React.FC = () => {
 
   const handleDeletePatient = React.useCallback(
     (patient: Patient) => {
-      if (!window.confirm(`${patient.name} silinsin mi? Danışanın ölçüm geçmişi ve randevuları da kaldırılır.`)) {
+      if (
+        !window.confirm(
+          `${patient.name} silinsin mi? Danışanın ölçüm geçmişi, randevuları, planı ve notları da kaldırılır.`
+        )
+      ) {
         return;
       }
       setPatients((prev) => prev.filter((item) => item.id !== patient.id));
-      updateStoredAppointments((appointments) => appointments.filter((appt) => appt.patient !== patient.name));
-      // Danışanın ölçüm geçmişini de temizle (varsa).
-      try {
-        const all = readStoredMeasurements();
-        if (patient.id in all) {
-          delete all[patient.id];
-          localStorage.setItem(MEASUREMENTS_STORAGE_KEY, JSON.stringify(all));
-        }
-      } catch {
-        // depolama kullanılamıyor — yoksay
-      }
+      updateStoredAppointments((appointments) => appointments.filter((appt) => !isAppointmentOf(appt, patient)));
+      removePatientLocalData(patient.id);
       if (selectedPatient?.id === patient.id) {
         setShowDetail(false);
       }
@@ -3097,7 +3599,7 @@ const App: React.FC = () => {
 
           {tab === "plans" && (
             <section className="tab-panel">
-              <DnDPlanEditor patients={patients} />
+              <DnDPlanEditor patients={patients} onUpdatePatient={handleUpdatePatient} />
             </section>
           )}
 
@@ -3145,7 +3647,14 @@ const App: React.FC = () => {
 
         <footer className="app-footer">© {new Date().getFullYear()} NutriCare · Diyetisyen Paneli</footer>
 
-        {showDetail ? <PatientDetailDrawer patient={selectedPatient} onClose={closeDetail} /> : null}
+        {showDetail ? (
+          <PatientDetailDrawer
+            // Seçim anındaki kopya yerine güncel kaydı ver; çekmecedeki değişiklikler anında yansısın.
+            patient={patients.find((patient) => patient.id === selectedPatient?.id) ?? null}
+            onClose={closeDetail}
+            onUpdatePatient={handleUpdatePatient}
+          />
+        ) : null}
 
         {patientModalOpen ? (
           <PatientFormModal
@@ -3169,11 +3678,17 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
     console.assert(getBMICategory(23.6) === "Normal", "23.6 => Normal olmalı");
     console.assert(getBMICategory(26.4) === "Fazla Kilolu", "26.4 => Fazla Kilolu olmalı");
     console.assert(getBMICategory(32.1) === "Obez", "32.1 => Obez olmalı");
-    console.assert(calculateBMR({ weightKg: 70, heightCm: 170, age: 30, sex: "erkek" }) === 1618, "BMR erkek 70/170/30 => 1618 olmalı");
-    console.assert(calculateBMR({ weightKg: 70, heightCm: 170, age: 30, sex: "kadin" }) === 1452, "BMR kadın 70/170/30 => 1452 olmalı");
+    console.assert(calculateBmrWithFormula({ weightKg: 70, heightCm: 170, age: 30, sex: "erkek" }, "mifflin") === 1618, "BMR erkek 70/170/30 => 1618 olmalı");
+    console.assert(calculateBmrWithFormula({ weightKg: 70, heightCm: 170, age: 30, sex: "kadin" }, "mifflin") === 1452, "BMR kadın 70/170/30 => 1452 olmalı");
+    console.assert(calculateBmrWithFormula({ weightKg: 70, heightCm: 170, age: 30, sex: "erkek" }, "harris") === 1672, "Harris erkek 70/170/30 => 1672 olmalı");
     console.assert(
-      calculateTargets({ weightKg: 70, heightCm: 170, age: 30, sex: "erkek" }, "orta", "koruma", { carbsPct: 50, proteinPct: 20, fatPct: 30 }).targetCalories === 2508,
+      calculateTargets({ weightKg: 70, heightCm: 170, age: 30, sex: "erkek" }, "orta", "koruma", { carbsPct: 50, proteinPct: 20, fatPct: 30 }, "mifflin").targetCalories === 2508,
       "TDEE 1618x1.55 koruma => 2508 olmalı"
+    );
+    console.assert(addDaysIso("2025-11-03", 14) === "2025-11-17", "2025-11-03 + 14 gün => 2025-11-17 olmalı");
+    console.assert(
+      gridCompliance([[true, true, false, false, false], [true, true, true, true, true]], 2) === 70,
+      "2 günde 7/10 öğün => %70 olmalı"
     );
     console.assert(
       timeAgoTr(new Date(Date.now() - 5 * 60000).toISOString()) === "5 dk önce",
