@@ -945,6 +945,10 @@ td { padding: 13px 8px 13px 0; border-bottom: 1px solid var(--slate-100); }
 /* ---------- Diet planner (BMR + macros + PDF) ---------- */
 .planner-stack { display: flex; flex-direction: column; gap: 16px; }
 .calc-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+/* Uzun seçenekli alanlar (Aktivite, Hedef) iki sütun kaplar; metin kesilmez. */
+.calc-wide { grid-column: span 2; }
+.calc-head-meta { display: inline-flex; align-items: center; gap: 10px; }
+.calc-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
 .calc-results { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; align-items: stretch; }
 .calc-chip {
   border: 1px solid var(--slate-200);
@@ -980,6 +984,10 @@ td { padding: 13px 8px 13px 0; border-bottom: 1px solid var(--slate-100); }
 
 @media (max-width: 640px) {
   .macro-edit { margin-left: 0; width: 100%; grid-template-columns: repeat(3, 1fr); }
+}
+
+@media (max-width: 480px) {
+  .calc-wide { grid-column: auto; }
 }
 
 /* ---------- Measurements ---------- */

@@ -31,6 +31,8 @@ interface Props {
   onSessionTimeoutSave: (minutes: number) => void;
   /** Yedek JSON'ı uygular; sonucu döndürür. */
   onImportData: (raw: unknown) => ImportResult;
+  /** Açılışta gösterilecek bölüm (örn. #/settings?bolum=beslenme). */
+  initialSection?: SettingsSectionKey;
 }
 
 const SECTIONS: Array<{ key: SettingsSectionKey; label: string; icon: React.ReactNode }> = [
@@ -89,9 +91,22 @@ const collectErrors = (draft: ClinicSettings): string[] => {
   return errors;
 };
 
-export const SettingsView: React.FC<Props> = ({ patients, getMeasurements, onSessionTimeoutSave, onImportData }) => {
+export const SettingsView: React.FC<Props> = ({
+  patients,
+  getMeasurements,
+  onSessionTimeoutSave,
+  onImportData,
+  initialSection
+}) => {
   const { draft, updateDraft, isDirty, save, resetDefaults, toast } = useSettings();
-  const [section, setSection] = React.useState<SettingsSectionKey>("profil");
+  const [section, setSection] = React.useState<SettingsSectionKey>(initialSection ?? "profil");
+
+  // Ayarlar açıkken başka bir sayfadan bölüm bağlantısıyla gelinirse o bölüme geç.
+  React.useEffect(() => {
+    if (initialSection) {
+      setSection(initialSection);
+    }
+  }, [initialSection]);
 
   const updateSection = React.useCallback(
     <K extends keyof ClinicSettings>(key: K, patch: Partial<ClinicSettings[K]>) => {

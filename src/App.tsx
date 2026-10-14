@@ -61,7 +61,8 @@ import {
   SETTINGS_STORAGE_KEY,
   type BmrFormula,
   type ProfileSettings,
-  type ScheduleSettings
+  type ScheduleSettings,
+  type SettingsSectionKey
 } from "./types/settings";
 import {
   ALERT_RULES_STORAGE_KEY,
@@ -527,6 +528,14 @@ const ACTIVITY_EVENTS = ["mousemove", "mousedown", "keydown", "touchstart", "whe
 type AppTab = "dashboard" | "patients" | "plans" | "appointments" | "alerts" | "settings";
 
 const TAB_KEYS: AppTab[] = ["dashboard", "patients", "plans", "appointments", "alerts", "settings"];
+
+const SETTINGS_SECTIONS: SettingsSectionKey[] = ["profil", "beslenme", "bildirim", "calisma", "guvenlik"];
+
+/** "?bolum=beslenme" → Ayarlar'da açılacak bölüm; geçersizse undefined. */
+const settingsSectionFromSearch = (search: string): SettingsSectionKey | undefined => {
+  const value = new URLSearchParams(search).get("bolum");
+  return (SETTINGS_SECTIONS as string[]).includes(value ?? "") ? (value as SettingsSectionKey) : undefined;
+};
 
 /** URL yolunu geçerli bir sekmeye çevirir; tanınmayan yol dashboard'a düşer. */
 const pathToTab = (pathname: string): AppTab => {
@@ -1652,13 +1661,22 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
   });
   const [activity, setActivity] = usePersistentState<ActivityLevel>("dp_plan_activity", "orta");
   const [goal, setGoal] = usePersistentState<WeightGoal>("dp_plan_goal", "verme");
-  // İlk açılışta makrolar ayarlardaki varsayılan dağılımdan gelir.
-  const [macros, setMacros] = usePersistentState<MacroSplit>("dp_plan_macros", () => {
+  // Makrolar seçili hedefin dağılımıyla başlar (hedef değişince de ona döner);
+  // ayarlardaki klinik varsayılanı "Klinik varsayılanı" ile uygulanır.
+  const [macros, setMacros] = usePersistentState<MacroSplit>("dp_plan_macros", () => ({
+    ...GOAL_ADJUSTMENTS[goal].macros
+  }));
+  const clinicMacros = React.useMemo(() => {
     const { macroPresetId, customMacros } = clinic.nutrition;
     const preset = MACRO_PRESETS.find((item) => item.id === macroPresetId);
     const source = macroPresetId === "custom" || !preset ? customMacros : preset;
-    return { carbsPct: source.carbsPct, proteinPct: source.proteinPct, fatPct: source.fatPct };
-  });
+    return {
+      label: preset && macroPresetId !== "custom" ? preset.label : `Özel ${source.carbsPct}/${source.proteinPct}/${source.fatPct}`,
+      macros: { carbsPct: source.carbsPct, proteinPct: source.proteinPct, fatPct: source.fatPct }
+    };
+  }, [clinic]);
+  const navigate = useNavigate();
+  const openNutritionSettings = () => navigate("/settings?bolum=beslenme");
   const [savedMsg, setSavedMsg] = React.useState<string | null>(null);
 
   const bmrFormula = clinic.nutrition.bmrFormula;
@@ -1813,8 +1831,11 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
           <h3>
             <Calculator size={15} /> BMR & Hedef Kalori Hesaplayıcı
           </h3>
-          <span className="badge badge-emerald" title="Ayarlar > Beslenme bölümünden değiştirilebilir">
-            {BMR_FORMULA_LABELS[bmrFormula]}
+          <span className="calc-head-meta">
+            <span className="badge badge-emerald">{BMR_FORMULA_LABELS[bmrFormula]}</span>
+            <button type="button" className="btn btn-link btn-small" onClick={openNutritionSettings}>
+              Ayarlarda değiştir
+            </button>
           </span>
         </div>
         <div className="calc-grid">
@@ -1837,7 +1858,7 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
               <option value="erkek">Erkek</option>
             </select>
           </div>
-          <div>
+          <div className="calc-wide">
             <label className="label">Aktivite</label>
             <select className="input" value={activity} onChange={(event) => setActivity(event.target.value as ActivityLevel)}>
               {(Object.keys(ACTIVITY_FACTORS) as ActivityLevel[]).map((key) => (
@@ -1847,7 +1868,7 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
               ))}
             </select>
           </div>
-          <div>
+          <div className="calc-wide">
             <label className="label">Hedef</label>
             <select
               className="input"
@@ -1873,9 +1894,10 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
             <span className="muted">Günlük Hedef</span>
             <strong>{targets.targetCalories} kcal</strong>
           </div>
-          <div className="calc-chip" title={`${clinic.nutrition.hydrationMlPerKg} ml/kg`}>
+          <div className="calc-chip">
             <span className="muted">Su Hedefi</span>
             <strong>{(waterMl / 1000).toFixed(1)} L</strong>
+            <small className="muted">{clinic.nutrition.hydrationMlPerKg} ml/kg</small>
           </div>
           <div className="macro-edit">
             <div>
@@ -1892,13 +1914,23 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
             </div>
           </div>
         </div>
-        {macroSum !== 100 ? (
-          <p className="field-error">Makro yüzdeleri toplamı %{macroSum} — hedef %{100} olmalı, gramlar oransal hesaplanır.</p>
-        ) : (
-          <p className="muted muted-spaced">
-            Hedef dağılım: {targets.carbsG} g karbonhidrat · {targets.proteinG} g protein · {targets.fatG} g yağ
-          </p>
-        )}
+        <div className="calc-foot">
+          {macroSum !== 100 ? (
+            <p className="field-error">Makro yüzdeleri toplamı %{macroSum} — hedef %{100} olmalı, gramlar oransal hesaplanır.</p>
+          ) : (
+            <p className="muted">
+              Hedef dağılım: {targets.carbsG} g karbonhidrat · {targets.proteinG} g protein · {targets.fatG} g yağ
+            </p>
+          )}
+          <button
+            type="button"
+            className="btn btn-outline btn-small"
+            onClick={() => setMacros({ ...clinicMacros.macros })}
+            title="Ayarlar > Beslenme bölümündeki varsayılan makro dağılımı"
+          >
+            Klinik varsayılanı: {clinicMacros.label}
+          </button>
+        </div>
       </div>
 
       <div className="card">
@@ -3640,6 +3672,7 @@ const App: React.FC = () => {
                 getMeasurements={getMeasurements}
                 onSessionTimeoutSave={applySessionTimeout}
                 onImportData={handleImportData}
+                initialSection={settingsSectionFromSearch(location.search)}
               />
             </section>
           )}
