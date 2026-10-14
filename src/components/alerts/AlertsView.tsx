@@ -19,7 +19,7 @@ import {
   UtensilsCrossed
 } from "lucide-react";
 import type { MeasurementLike } from "../../types/settings";
-import { loadSettings } from "../../types/settings";
+import { loadSettings, saveSettings } from "../../types/settings";
 import type { AlertCategory, AlertRules, AlertSeverity, PatientAlert } from "../../types/alerts";
 import {
   CATEGORY_META,
@@ -57,6 +57,25 @@ const rulesFromClinicSettings = (): AlertRules => {
     };
   } catch {
     return { ...DEFAULT_ALERT_RULES };
+  }
+};
+
+/** Ortak alanları Ayarlar > Bildirimler & Risk'e geri yazar; iki ekran aynı değerleri göstersin. */
+const syncClinicSettingsWithRules = (rules: AlertRules): void => {
+  try {
+    const clinic = loadSettings();
+    saveSettings({
+      ...clinic,
+      notifications: {
+        ...clinic.notifications,
+        complianceThreshold: rules.complianceThreshold,
+        missedMealHours: rules.missedMealHours,
+        quietStart: rules.quietHoursRange[0],
+        quietEnd: rules.quietHoursRange[1]
+      }
+    });
+  } catch {
+    // depolama kullanılamıyor — yoksay
   }
 };
 
@@ -236,6 +255,7 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, onOpenP
 
   const handleSaveRules = React.useCallback(() => {
     saveAlertRules(rules);
+    syncClinicSettingsWithRules(rules);
     setSavedRules({ ...rules });
     showToast("Kurallar kaydedildi — uyarı akışı güncellendi.");
   }, [rules, showToast]);
@@ -243,6 +263,7 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, onOpenP
   const handleResetRules = React.useCallback(() => {
     const next = { ...DEFAULT_ALERT_RULES };
     saveAlertRules(next);
+    syncClinicSettingsWithRules(next);
     setRules(next);
     setSavedRules(next);
     showToast("Kurallar varsayılanlara sıfırlandı.");

@@ -1846,6 +1846,18 @@ const readStoredAppointments = (): Appointment[] => {
   }
 };
 
+/**
+ * Danışan adı değiştiğinde/silindiğinde kayıtlı randevuları günceller.
+ * Randevular danışanı adıyla tuttuğu için bu olmadan yetim kayıtlar kalır.
+ */
+const updateStoredAppointments = (update: (appointments: Appointment[]) => Appointment[]): void => {
+  try {
+    localStorage.setItem(APPOINTMENTS_STORAGE_KEY, JSON.stringify(update(readStoredAppointments())));
+  } catch {
+    // depolama kullanılamıyor — yoksay
+  }
+};
+
 type AppNotification = {
   id: string;
   title: string;
@@ -2610,6 +2622,12 @@ const App: React.FC = () => {
 
   const handleSavePatient = React.useCallback(
     (draft: PatientDraft) => {
+      if (editingPatient && editingPatient.name !== draft.name) {
+        const oldName = editingPatient.name;
+        updateStoredAppointments((appointments) =>
+          appointments.map((appt) => (appt.patient === oldName ? { ...appt, patient: draft.name } : appt))
+        );
+      }
       setPatients((prev) => {
         if (editingPatient) {
           return prev.map((patient) =>
@@ -2637,10 +2655,11 @@ const App: React.FC = () => {
 
   const handleDeletePatient = React.useCallback(
     (patient: Patient) => {
-      if (!window.confirm(`${patient.name} silinsin mi? Danışanın ölçüm geçmişi de kaldırılır.`)) {
+      if (!window.confirm(`${patient.name} silinsin mi? Danışanın ölçüm geçmişi ve randevuları da kaldırılır.`)) {
         return;
       }
       setPatients((prev) => prev.filter((item) => item.id !== patient.id));
+      updateStoredAppointments((appointments) => appointments.filter((appt) => appt.patient !== patient.name));
       // Danışanın ölçüm geçmişini de temizle (varsa).
       try {
         const all = readStoredMeasurements();
@@ -2667,12 +2686,16 @@ const App: React.FC = () => {
       const isDate = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
       const num = (value: unknown, fallback = 0): number =>
         typeof value === "number" && Number.isFinite(value) ? value : fallback;
+      const numText = (value: unknown): string =>
+        typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+      const MAX_TEXT = 120;
 
       const rows = (raw as { patients: unknown[] }).patients;
       const nextPatients: Patient[] = [];
       const nextMeasurements: Record<number, Measurement[]> = {};
       const usedIds = new Set<number>();
       let measurementCount = 0;
+      let skippedMeasurements = 0;
 
       rows.forEach((entry, index) => {
         if (typeof entry !== "object" || entry === null) {
@@ -2691,8 +2714,8 @@ const App: React.FC = () => {
         const startDate = isDate(row.startDate) ? (row.startDate as string) : today;
         nextPatients.push({
           id,
-          name: row.name.trim(),
-          plan: typeof row.plan === "string" && row.plan.trim() ? row.plan.trim() : "Plan atanmadı",
+          name: row.name.trim().slice(0, MAX_TEXT),
+          plan: typeof row.plan === "string" && row.plan.trim() ? row.plan.trim().slice(0, MAX_TEXT) : "Plan atanmadı",
           startDate,
           endDate: isDate(row.endDate) ? (row.endDate as string) : startDate,
           compliance: Math.max(0, Math.min(100, Math.round(num(row.compliance)))),
@@ -2701,19 +2724,41 @@ const App: React.FC = () => {
         });
 
         if (Array.isArray(row.measurements)) {
-          const valid = (row.measurements as unknown[])
-            .filter((m): m is Record<string, unknown> => typeof m === "object" && m !== null && isDate((m as Record<string, unknown>).date))
-            .map((m, mi) => ({
-              id: typeof m.id === "string" ? (m.id as string) : `imp-${id}-${mi}`,
-              date: m.date as string,
+          // Ölçümler formdaki kurallarla (validateMeasurementForm) aynı sınırlardan geçer;
+          // aralık dışı / eksik değerli kayıtlar atlanır.
+          const valid: Measurement[] = [];
+          (row.measurements as unknown[]).forEach((item, mi) => {
+            if (typeof item !== "object" || item === null) {
+              skippedMeasurements += 1;
+              return;
+            }
+            const m = item as Record<string, unknown>;
+            const formValues: MeasurementFormValues = {
+              date: isDate(m.date) ? m.date : "",
+              weightKg: numText(m.weightKg),
+              heightCm: numText(m.heightCm),
+              bodyFatPercentage: numText(m.bodyFatPercentage),
+              muscleMassKg: numText(m.muscleMassKg),
+              waistCm: numText(m.waistCm),
+              hipCm: numText(m.hipCm),
+              notes: typeof m.notes === "string" ? m.notes : ""
+            };
+            if (Object.keys(validateMeasurementForm(formValues)).length > 0) {
+              skippedMeasurements += 1;
+              return;
+            }
+            valid.push({
+              id: typeof m.id === "string" ? m.id.slice(0, 64) : `imp-${id}-${mi}`,
+              date: formValues.date,
               weightKg: num(m.weightKg),
               heightCm: num(m.heightCm),
               bodyFatPercentage: num(m.bodyFatPercentage),
               muscleMassKg: num(m.muscleMassKg),
               waistCm: num(m.waistCm),
               hipCm: num(m.hipCm),
-              notes: typeof m.notes === "string" ? (m.notes as string) : ""
-            }));
+              notes: formValues.notes
+            });
+          });
           if (valid.length > 0) {
             nextMeasurements[id] = valid;
             measurementCount += valid.length;
@@ -2734,7 +2779,9 @@ const App: React.FC = () => {
       setShowDetail(false);
       return {
         ok: true,
-        message: `${nextPatients.length} danışan ve ${measurementCount} ölçüm geri yüklendi.`
+        message:
+          `${nextPatients.length} danışan ve ${measurementCount} ölçüm geri yüklendi.` +
+          (skippedMeasurements > 0 ? ` ${skippedMeasurements} geçersiz ölçüm atlandı.` : "")
       };
     },
     [setPatients]
@@ -2778,7 +2825,7 @@ const App: React.FC = () => {
   const searchPlaceholder = searchPlaceholders[tab] ?? "Ara...";
 
   return (
-    <div className="layout app-shell">
+    <div className={classNames("layout app-shell", mobileNavOpen && "nav-open")}>
       <Sidebar
         tab={tab}
         onNavigate={(next) => {
@@ -2960,7 +3007,7 @@ const App: React.FC = () => {
           {tab === "settings" && (
             <section className="tab-panel">
               <SettingsView
-                patients={filteredPatients.map((patient) => ({
+                patients={patients.map((patient) => ({
                   id: patient.id,
                   name: patient.name,
                   plan: patient.plan,

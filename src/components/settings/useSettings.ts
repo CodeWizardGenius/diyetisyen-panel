@@ -5,6 +5,7 @@ import {
   loadSettings,
   saveSettings
 } from "../../types/settings";
+import { syncAlertRulesWithClinic } from "../../types/alerts";
 
 const clone = (value: ClinicSettings): ClinicSettings =>
   JSON.parse(JSON.stringify(value)) as ClinicSettings;
@@ -56,6 +57,7 @@ export const useSettings = (): UseSettingsResult => {
   const save = React.useCallback(() => {
     const next = clone(draft);
     saveSettings(next);
+    syncAlertRulesWithClinic(next.notifications);
     setSettings(next);
     showToast("Değişiklikler kaydedildi.");
   }, [draft, showToast]);
@@ -63,6 +65,7 @@ export const useSettings = (): UseSettingsResult => {
   const resetDefaults = React.useCallback(() => {
     const next = clone(DEFAULT_SETTINGS);
     saveSettings(next);
+    syncAlertRulesWithClinic(next.notifications);
     setSettings(next);
     setDraft(next);
     showToast("Ayarlar varsayılanlara sıfırlandı.");

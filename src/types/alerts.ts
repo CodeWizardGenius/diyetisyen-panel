@@ -97,6 +97,28 @@ export const saveAlertRules = (rules: AlertRules): void => {
   localStorage.setItem(ALERT_RULES_STORAGE_KEY, JSON.stringify(rules));
 };
 
+/**
+ * Ayarlar > Bildirimler & Risk ile ortak alanları (uyum eşiği, kaçan öğün saati, sessiz saatler)
+ * kayıtlı kurallara yansıtır. Kayıtlı kural yoksa bir şey yapmaz — o durumda zaten klinik ayarlar kullanılır.
+ */
+export const syncAlertRulesWithClinic = (clinic: {
+  complianceThreshold: number;
+  missedMealHours: number;
+  quietStart: string;
+  quietEnd: string;
+}): void => {
+  if (typeof window === "undefined" || !localStorage.getItem(ALERT_RULES_STORAGE_KEY)) {
+    return;
+  }
+  const current = loadAlertRules();
+  saveAlertRules({
+    ...current,
+    complianceThreshold: clinic.complianceThreshold,
+    missedMealHours: clinic.missedMealHours,
+    quietHoursRange: [clinic.quietStart, clinic.quietEnd]
+  });
+};
+
 /** Çözüldü olarak işaretlenen uyarı id'leri (motor yeniden üretse bile korunur). */
 export const loadResolvedIds = (): string[] => {
   if (typeof window === "undefined") {

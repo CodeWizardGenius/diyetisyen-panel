@@ -44,6 +44,27 @@ const downloadFile = (filename: string, content: string, mime: string): void => 
 
 const todayStamp = (): string => new Date().toISOString().slice(0, 10);
 
+/** JSON yedeği için üst sınır — büyük dosyaların tarayıcıyı kilitlemesini önler. */
+const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Tek bir CSV hücresini güvenli hale getirir: formül olarak yorumlanabilecek
+ * (=, +, -, @, sekme, CR ile başlayan) metinlerin başına ' eklenir ve ayraç,
+ * tırnak veya satır sonu içeren değerler çift tırnakla sarılır.
+ */
+const csvCell = (value: unknown): string => {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  let text = String(value);
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(text)) {
+    text = `'${text}`;
+  }
+  return /[;"\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+const csvRow = (values: unknown[]): string => values.map(csvCell).join(";");
+
 export const SecurityPanel: React.FC<Props> = ({
   sessionTimeoutMin,
   onSessionTimeoutChange,
@@ -62,6 +83,10 @@ export const SecurityPanel: React.FC<Props> = ({
     const file = event.target.files?.[0];
     event.target.value = ""; // aynı dosya tekrar seçilebilsin
     if (!file) {
+      return;
+    }
+    if (file.size > MAX_IMPORT_BYTES) {
+      setImportMsg({ ok: false, text: "Dosya çok büyük — en fazla 5 MB'lık bir JSON yedeği seçin." });
       return;
     }
     const reader = new FileReader();
@@ -102,12 +127,22 @@ export const SecurityPanel: React.FC<Props> = ({
     const header = "danisan;plan;uyum;durum;tarih;kilo_kg;boy_cm;yag_yuzde;kas_kg;bel_cm;kalca_cm;not";
     const lines = patients.flatMap((patient) => {
       const rows = getMeasurements(patient.id);
+      const base = [patient.name, patient.plan, patient.compliance, patient.status];
       if (rows.length === 0) {
-        return [`${patient.name};${patient.plan};${patient.compliance};${patient.status};;;;;;;`];
+        return [csvRow([...base, "", "", "", "", "", "", "", ""])];
       }
-      return rows.map(
-        (m) =>
-          `${patient.name};${patient.plan};${patient.compliance};${patient.status};${m.date};${m.weightKg};${m.heightCm};${m.bodyFatPercentage};${m.muscleMassKg};${m.waistCm};${m.hipCm};${(m.notes ?? "").replace(/;/g, ",")}`
+      return rows.map((m) =>
+        csvRow([
+          ...base,
+          m.date,
+          m.weightKg,
+          m.heightCm,
+          m.bodyFatPercentage,
+          m.muscleMassKg,
+          m.waistCm,
+          m.hipCm,
+          m.notes ?? ""
+        ])
       );
     });
     downloadFile(
