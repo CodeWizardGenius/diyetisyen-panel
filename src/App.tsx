@@ -333,6 +333,26 @@ const removePatientLocalData = (patientId: number): void => {
   }
 };
 
+/**
+ * Yedek geri yüklenirken eski danışanların plan, not, hatırlatma ve öğün çizelgesi kayıtlarını siler;
+ * aynı kimlik numarasını alan yeni danışanlara karışmasınlar. Ölçümler içe aktarmada ayrıca yazılır.
+ */
+const clearPatientScopedStorage = (): void => {
+  try {
+    [PATIENT_PLANS_KEY, PATIENT_NOTES_KEY, PATIENT_REMINDERS_KEY].forEach((key) => localStorage.removeItem(key));
+    const gridKeys: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key?.startsWith("dp_meal_grid_")) {
+        gridKeys.push(key);
+      }
+    }
+    gridKeys.forEach((key) => localStorage.removeItem(key));
+  } catch {
+    // depolama kullanılamıyor — yoksay
+  }
+};
+
 const getInitialMeasurements = (patientId: number): Measurement[] => {
   const stored = readStoredMeasurements()[patientId];
   if (stored) {
@@ -345,6 +365,7 @@ const getInitialMeasurements = (patientId: number): Measurement[] => {
   return [];
 };
 
+/** Örnek veri: hiçbir danışanın öğün çizelgesinde işaret yokken dashboard grafiklerinde gösterilir. */
 const ADHERENCE_SERIES = [
   { day: "1", value: 70 },
   { day: "2", value: 68 },
@@ -831,6 +852,60 @@ const gridCompliance = (grid: MealGridState, elapsed: number): number | null => 
   const due = grid.slice(0, elapsed);
   const done = due.reduce((sum, row) => sum + row.filter(Boolean).length, 0);
   return Math.round((done / (elapsed * GRID_MEALS.length)) * 100);
+};
+
+type DashboardCharts = {
+  adherence: Array<{ day: string; value: number | null }>;
+  meals: Array<{ label: string; done: number }>;
+  /** Hesaba katılan (çizelgesinde en az bir işaret olan) danışan sayısı; 0 ise örnek veri. */
+  trackedPatients: number;
+};
+
+/**
+ * Dashboard grafikleri danışanların öğün çizelgelerinden hesaplanır. Yalnızca çizelgede en az bir
+ * işaret olan danışanlar sayılır (hiç kullanılmayan çizelge ortalamayı sıfıra çekmesin).
+ * Hiç işaret yoksa örnek seriler döner.
+ */
+const buildDashboardCharts = (patients: Patient[]): DashboardCharts => {
+  const tracked = patients
+    .map((patient) => ({ patient, grid: readMealGrid(patient.id) }))
+    .filter(({ grid }) => grid.some((row) => row.some(Boolean)));
+  if (tracked.length === 0) {
+    return { adherence: ADHERENCE_SERIES, meals: MEAL_COMPLETION, trackedPatients: 0 };
+  }
+
+  const today = todayIso();
+  const adherence = Array.from({ length: 7 }, (_, index) => {
+    const date = addDaysIso(today, index - 6);
+    let done = 0;
+    let due = 0;
+    for (const { patient, grid } of tracked) {
+      const day = daysBetweenIso(patient.startDate, date);
+      if (day >= 0 && day < PLAN_DAYS) {
+        done += grid[day].filter(Boolean).length;
+        due += GRID_MEALS.length;
+      }
+    }
+    // O gün planı süren danışan yoksa boşluk bırakılır.
+    return { day: `${date.slice(8, 10)}.${date.slice(5, 7)}`, value: due > 0 ? Math.round((done / due) * 100) : null };
+  });
+
+  const meals = GRID_MEALS.map((meal, mealIndex) => {
+    let done = 0;
+    let due = 0;
+    for (const { patient, grid } of tracked) {
+      const elapsed = elapsedPlanDays(patient.startDate);
+      for (let day = 0; day < elapsed; day += 1) {
+        due += 1;
+        if (grid[day][mealIndex]) {
+          done += 1;
+        }
+      }
+    }
+    return { label: meal.label, done: due > 0 ? Math.round((done / due) * 100) : 0 };
+  });
+
+  return { adherence, meals, trackedPatients: tracked.length };
 };
 
 const MealGrid: React.FC<{
@@ -1679,6 +1754,30 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
   const navigate = useNavigate();
   const openNutritionSettings = () => navigate("/settings?bolum=beslenme");
   const [savedMsg, setSavedMsg] = React.useState<string | null>(null);
+
+  // Danışan değişince kayıtlı planını ve son ölçümünü yükle. İlk açılışta çalışmaz:
+  // kaydedilmemiş taslak (dp_plan_*) korunur.
+  const previousPatientId = React.useRef(patientId);
+  React.useEffect(() => {
+    if (previousPatientId.current === patientId) {
+      return;
+    }
+    previousPatientId.current = patientId;
+    setSavedMsg(null);
+    const saved = readPatientRecord<SavedPatientPlan>(PATIENT_PLANS_KEY)[patientId];
+    if (saved && Array.isArray(saved.items)) {
+      setItems(saved.items);
+      setTemplateName(saved.templateName);
+      setMacros(saved.macros);
+      setNotes(saved.notes);
+      setRepeat(saved.repeat);
+    }
+    const measurements = getInitialMeasurements(patientId);
+    const latest = measurements[measurements.length - 1];
+    if (latest) {
+      setProfile((prev) => ({ ...prev, weightKg: latest.weightKg, heightCm: latest.heightCm }));
+    }
+  }, [patientId, setItems, setTemplateName, setMacros, setNotes, setRepeat, setProfile]);
 
   const bmrFormula = clinic.nutrition.bmrFormula;
   const targets = React.useMemo(
@@ -2738,7 +2837,8 @@ const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ pa
 };
 
 const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
-  const measurements = React.useMemo(() => getInitialMeasurements(patient.id), [patient.id]);
+  // Her çizimde güncel kayıt okunur; ölçüm sekmesindeki ekleme/düzenleme/silme hemen yansır.
+  const measurements = getInitialMeasurements(patient.id);
   const latest = measurements.length > 0 ? measurements[measurements.length - 1] : undefined;
   const previous = measurements.length > 1 ? measurements[measurements.length - 2] : undefined;
   const bmi = latest ? calculateBMI(latest.weightKg, latest.heightCm) : 0;
@@ -3343,7 +3443,12 @@ const App: React.FC = () => {
         return { ok: false, message: "Geçersiz yedek: 'patients' listesi bulunamadı." };
       }
       const today = new Date().toISOString().slice(0, 10);
-      const isDate = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+      // Biçim + gerçek takvim günü: "2025-99-99" ve "2025-02-30" gibi değerler elenir.
+      const isDate = (value: unknown): value is string =>
+        typeof value === "string" &&
+        /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+        !Number.isNaN(Date.parse(value)) &&
+        new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
       const num = (value: unknown, fallback = 0): number =>
         typeof value === "number" && Number.isFinite(value) ? value : fallback;
       const numText = (value: unknown): string =>
@@ -3436,6 +3541,17 @@ const App: React.FC = () => {
       } catch {
         // depolama kullanılamıyor — yoksay
       }
+      clearPatientScopedStorage();
+      // Randevular yedekte yok: kimliği yeni listede aynı adla eşleşmeyenler ada göre eşleşmeye döner.
+      updateStoredAppointments((appointments) =>
+        appointments.map((appt) => {
+          if (appt.patientId === undefined) {
+            return appt;
+          }
+          const match = nextPatients.find((patient) => patient.id === appt.patientId);
+          return match && match.name === appt.patient ? appt : { ...appt, patientId: undefined };
+        })
+      );
       setShowDetail(false);
       return {
         ok: true,
@@ -3460,6 +3576,15 @@ const App: React.FC = () => {
     const upcomingAppointments = readStoredAppointments().filter((appt) => appt.date >= todayIso).length;
     return { total, active, avgCompliance, upcomingAppointments };
   }, [patients, tab]);
+
+  // Çizelge işaretleri danışanın uyumunu da güncellediği için `patients` değişimi yeniden hesaplatır.
+  const dashboardCharts = React.useMemo(() => buildDashboardCharts(patients), [patients, tab]);
+  const adherenceTrend = React.useMemo(() => {
+    const values = dashboardCharts.adherence
+      .map((point) => point.value)
+      .filter((value): value is number => value !== null);
+    return values.length >= 2 ? values[values.length - 1] - values[0] : null;
+  }, [dashboardCharts]);
 
   // Giriş ekranından (#/giris) giriş yapılınca panelin ana sayfasına geç.
   React.useEffect(() => {
@@ -3562,15 +3687,22 @@ const App: React.FC = () => {
                 <div className="card chart-card span-3">
                   <div className="card-head">
                     <h3><Activity size={15} /> 7 Günlük Uyum Yüzdesi</h3>
-                    <span className="badge badge-emerald"><TrendingUp size={12} /> +%8</span>
+                    {dashboardCharts.trackedPatients === 0 ? (
+                      <span className="badge badge-slate" title="Öğün çizelgesinde henüz işaret yok">Örnek veri</span>
+                    ) : adherenceTrend !== null ? (
+                      <span className={classNames("badge", adherenceTrend >= 0 ? "badge-emerald" : "badge-rose")}>
+                        {adherenceTrend >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+                        {adherenceTrend >= 0 ? "+" : "−"}%{Math.abs(adherenceTrend)}
+                      </span>
+                    ) : null}
                   </div>
                   <div className="chart">
                     <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={ADHERENCE_SERIES}>
+                      <LineChart data={dashboardCharts.adherence}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                         <XAxis dataKey="day" tick={{ fontSize: 12 }} />
                         <YAxis domain={[0, 100]} tick={{ fontSize: 12 }} />
-                        <Tooltip />
+                        <Tooltip formatter={(value) => [`%${value}`, "Uyum"]} />
                         <Line type="monotone" dataKey="value" stroke="#059669" strokeWidth={2.5} dot={{ r: 3, fill: "#059669" }} />
                       </LineChart>
                     </ResponsiveContainer>
@@ -3580,14 +3712,19 @@ const App: React.FC = () => {
                 <div className="card chart-card span-2">
                   <div className="card-head">
                     <h3><UtensilsCrossed size={15} /> Öğün Tamamlama Dağılımı</h3>
+                    <span className="muted">
+                      {dashboardCharts.trackedPatients === 0
+                        ? "Örnek veri"
+                        : `${dashboardCharts.trackedPatients} danışanın çizelgesi`}
+                    </span>
                   </div>
                   <div className="chart">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={MEAL_COMPLETION}>
+                      <BarChart data={dashboardCharts.meals}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                         <XAxis dataKey="label" tick={{ fontSize: 11 }} interval={0} angle={-12} dy={8} height={52} />
                         <YAxis domain={[0, 100]} tick={{ fontSize: 12 }} />
-                        <Tooltip />
+                        <Tooltip formatter={(value) => [`%${value}`, "Tamamlanan"]} />
                         <Bar dataKey="done" fill="#10b981" radius={[8, 8, 0, 0]} />
                       </BarChart>
                     </ResponsiveContainer>

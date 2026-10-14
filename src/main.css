@@ -606,7 +606,8 @@ a { color: inherit; text-decoration: none; }
 .chart-card { display: flex; flex-direction: column; gap: 12px; }
 .chart-card .chart { height: 260px; }
 .chart-tall { height: 300px; }
-@media (min-width: 1024px) {
+/* .grid-lg-5 ile aynı eşik: 768–1023 px arasında grafikler 1/5 sütuna sıkışmasın. */
+@media (min-width: 768px) {
   .span-3 { grid-column: span 3; }
   .span-2 { grid-column: span 2; }
 }

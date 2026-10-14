@@ -57,7 +57,8 @@ const csvCell = (value: unknown): string => {
     return "";
   }
   let text = String(value);
-  if (typeof value === "string" && /^[=+\-@\t\r]/.test(text)) {
+  // Baştaki boşluklar da atlanır: " =1+1" gibi değerleri de bazı tablolama programları formül sayar.
+  if (typeof value === "string" && /^\s*[=+\-@\t\r]/.test(text)) {
     text = `'${text}`;
   }
   return /[;"\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
@@ -93,7 +94,11 @@ export const SecurityPanel: React.FC<Props> = ({
     reader.onload = () => {
       try {
         const parsed: unknown = JSON.parse(String(reader.result));
-        if (!window.confirm("Yedek içe aktarılsın mı? Mevcut danışan ve ölçüm verileri bu yedekle değiştirilecek.")) {
+        if (
+          !window.confirm(
+            "Yedek içe aktarılsın mı? Mevcut danışan ve ölçüm verileri bu yedekle değiştirilecek; danışanlara ait planlar, notlar, hatırlatma saatleri ve öğün çizelgeleri silinecek."
+          )
+        ) {
           return;
         }
         const result = onImportData(parsed);
