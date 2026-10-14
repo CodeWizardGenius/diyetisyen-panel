@@ -15,7 +15,8 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ThemeProvider>
       <ErrorBoundary>
-        <HashRouter>
+        {/* v7 davranışlarına şimdiden geç (konsoldaki "Future Flag" uyarıları kalkar). */}
+        <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
           <App />
         </HashRouter>
       </ErrorBoundary>
