@@ -52,6 +52,7 @@ import {
 import { useLocation, useNavigate } from "react-router-dom";
 import { SettingsView } from "./components/settings/SettingsView";
 import { AlertsView } from "./components/alerts/AlertsView";
+import { LandingPage } from "./components/landing/LandingPage";
 import { buildAlerts, isQuietNow, timeAgoTr } from "./components/alerts/alertEngine";
 import {
   calculateBmrWithFormula,
@@ -2079,9 +2080,11 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
   );
 };
 
-const LoginScreen: React.FC<{ onLogin: (email: string, password: string) => void }> = ({
-  onLogin
-}) => {
+const LoginScreen: React.FC<{
+  onLogin: (email: string, password: string) => void;
+  /** Tanıtım sayfasına dönüş. */
+  onBack?: () => void;
+}> = ({ onLogin, onBack }) => {
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
   const canSubmit = email.trim() !== "" && password.trim() !== "";
@@ -2127,6 +2130,11 @@ const LoginScreen: React.FC<{ onLogin: (email: string, password: string) => void
             Giriş
           </button>
           <p className="muted login-hint">Demo: Herhangi bir e-posta/şifre kabul edilir.</p>
+          {onBack ? (
+            <button type="button" className="btn btn-link btn-small login-back" onClick={onBack}>
+              <ChevronLeft size={14} /> Tanıtım sayfasına dön
+            </button>
+          ) : null}
         </form>
       </div>
     </div>
@@ -3453,8 +3461,22 @@ const App: React.FC = () => {
     return { total, active, avgCompliance, upcomingAppointments };
   }, [patients, tab]);
 
+  // Giriş ekranından (#/giris) giriş yapılınca panelin ana sayfasına geç.
+  React.useEffect(() => {
+    if (isAuthed && location.pathname === "/giris") {
+      navigate("/", { replace: true });
+    }
+  }, [isAuthed, location.pathname, navigate]);
+
+  // Tanıtım sayfası: giriş yapılmamışken kök adreste, her zaman #/tanitim adresinde.
+  // Diğer adreslerde (örn. süresi dolan oturumda #/settings) doğrudan giriş ekranı açılır.
+  const routePath = location.pathname.replace(/\/+$/, "") || "/";
+  if (routePath === "/tanitim" || (!isAuthed && routePath === "/")) {
+    return <LandingPage isAuthed={isAuthed} onStart={() => navigate(isAuthed ? "/" : "/giris")} />;
+  }
+
   if (!isAuthed) {
-    return <LoginScreen onLogin={handleLogin} />;
+    return <LoginScreen onLogin={handleLogin} onBack={() => navigate("/")} />;
   }
 
   const pageTitles: Record<AppTab, { title: string; desc: string }> = {
