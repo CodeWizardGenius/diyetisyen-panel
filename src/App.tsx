@@ -53,7 +53,9 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { SettingsView } from "./components/settings/SettingsView";
 import { AlertsView } from "./components/alerts/AlertsView";
 import { isQuietNow, timeAgoTr } from "./components/alerts/alertEngine";
-import { loadSettings } from "./types/settings";
+import { loadSettings, SETTINGS_STORAGE_KEY } from "./types/settings";
+import { ALERT_RULES_STORAGE_KEY } from "./types/alerts";
+import { THEME_STORAGE_KEY } from "./context/ThemeContext";
 
 type PatientStatus = "Aktif" | "Risk";
 
@@ -434,6 +436,39 @@ const clearAuthStorage = () => {
   localStorage.removeItem(AUTH_USER_KEY);
   localStorage.removeItem(AUTH_EXPIRES_KEY);
 };
+
+/**
+ * "Paylaşımlı bilgisayardan çıkış"ta korunacak "dp_" anahtarları: danışan verisi içermeyen arayüz
+ * tercihi ve klinik yapılandırması (tema, klinik ayarları, uyarı kuralları). Geri kalan tüm "dp_"
+ * anahtarları (danışanlar, ölçümler, randevular, plan taslağı, bildirimler, uyarı durumu…) iz
+ * kalmasın diye silinir. Yeni eklenen anahtarlar varsayılan olarak silinir.
+ */
+const LOGOUT_PRESERVED_KEYS = new Set<string>([THEME_STORAGE_KEY, SETTINGS_STORAGE_KEY, ALERT_RULES_STORAGE_KEY]);
+
+const clearSessionDataStorage = () => {
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("dp_") && !LOGOUT_PRESERVED_KEYS.has(key)) {
+        keys.push(key);
+      }
+    }
+    keys.forEach((key) => localStorage.removeItem(key));
+  } catch {
+    // depolama erişilemiyor — yapılacak bir şey yok
+  }
+};
+
+/** Ayarlardaki hareketsizlik süresi (dk), 5–180 aralığına sıkıştırılmış. */
+const getIdleTimeoutMin = (): number => {
+  const minutes = loadSettings().security.sessionTimeoutMin || DEFAULT_DURATION_MIN;
+  return Math.max(5, Math.min(180, minutes));
+};
+
+/** Kullanıcı etkinliğinde oturum süresinin en fazla bu aralıkla yenilenmesi (her fare hareketinde yazmamak için). */
+const ACTIVITY_REFRESH_THROTTLE_MS = 15 * 1000;
+const ACTIVITY_EVENTS = ["mousemove", "mousedown", "keydown", "touchstart", "wheel", "scroll"] as const;
 
 type AppTab = "dashboard" | "patients" | "plans" | "appointments" | "alerts" | "settings";
 
@@ -1286,7 +1321,8 @@ const escapeHtml = (value: string): string =>
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 
 const buildDietPrintHtml = (opts: {
   dietitian: string;
@@ -1504,14 +1540,33 @@ const DnDPlanEditor: React.FC<{ patients: Patient[] }> = ({ patients }) => {
       items,
       totals
     });
-    const win = window.open("", "_blank", "width=900,height=700");
+    // document.write yerine Blob URL: içerik ayrı bir belge olarak ayrıştırılır.
+    const url = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
+    const win = window.open(url, "_blank", "width=900,height=700");
     if (!win) {
+      URL.revokeObjectURL(url);
       return;
     }
-    win.document.write(html);
-    win.document.close();
-    win.focus();
-    window.setTimeout(() => win.print(), 400);
+    // Blob URL aynı kökenden olduğu için yeni pencerenin yüklenmesi izlenebilir; yüklenince yazdır ve URL'yi bırak.
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      let ready = false;
+      try {
+        ready = !win.closed && win.location.href === url && win.document.readyState === "complete";
+      } catch {
+        ready = false;
+      }
+      if (!ready && !win.closed && Date.now() - startedAt < 15000) {
+        return;
+      }
+      window.clearInterval(timer);
+      if (ready) {
+        win.focus();
+        win.print();
+      }
+      // Belge yüklendikten sonra URL'yi bırakmak açık pencereyi etkilemez.
+      URL.revokeObjectURL(url);
+    }, 100);
   };
 
   const setProfileField = (key: keyof BmrInput) => (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -1946,7 +2001,8 @@ const TopHeader: React.FC<{
   user: string | null;
   remainingSec: number;
   onExtend: () => void;
-  onLogout: () => void;
+  /** clearLocalData: paylaşımlı bilgisayar çıkışı — danışan verisini localStorage'dan da sil */
+  onLogout: (clearLocalData: boolean) => void;
   onMenuToggle: () => void;
 }> = ({ query, onQuery, showSearch, searchPlaceholder, user, remainingSec, onExtend, onLogout, onMenuToggle }) => {
   const [showNotifications, setShowNotifications] = React.useState(false);
@@ -2079,10 +2135,19 @@ const TopHeader: React.FC<{
               <button className="btn btn-outline btn-small" onClick={onExtend}>
                 <Clock size={14} /> Oturumu Uzat
               </button>
-              <button className="btn btn-outline btn-small" onClick={onLogout}>
+              <button className="btn btn-outline btn-small" onClick={() => onLogout(false)}>
                 <LogOut size={14} /> Çıkış
               </button>
             </div>
+            <button
+              type="button"
+              className="btn btn-outline btn-small"
+              style={{ width: "100%", marginTop: 8, justifyContent: "center" }}
+              title="Danışan, ölçüm, randevu, plan ve bildirim verileri bu tarayıcıdan silinir. Tema ve klinik ayarları korunur."
+              onClick={() => onLogout(true)}
+            >
+              <Trash2 size={14} /> Paylaşımlı bilgisayardan çıkış yap (yerel verileri temizle)
+            </button>
           </div>
         ) : null}
       </div>
@@ -2482,11 +2547,22 @@ const App: React.FC = () => {
     return Math.max(0, Math.floor((snapshot.expiresAt - Date.now()) / 1000));
   });
 
-  const handleLogout = React.useCallback(() => {
+  /**
+   * Normal çıkış yerel kayıtları korur; clearLocalData=true (paylaşımlı bilgisayar) danışan verisini
+   * localStorage'dan da siler. Her iki durumda da sayfa yeniden yüklenir, böylece bellekteki
+   * danışan verisi (React state'i) sıfırlanır ve giriş ekranında görünür kalmaz.
+   */
+  const handleLogout = React.useCallback((clearLocalData = false) => {
     clearAuthStorage();
+    if (clearLocalData) {
+      clearSessionDataStorage();
+    }
     setAuth({ token: null, user: null, expiresAt: 0 });
     setIsAuthed(false);
     setRemainingSec(0);
+    // Bellekteki danışan verisi de silinsin diye sayfayı ana sayfadan yeniden yükle.
+    window.history.replaceState(null, "", "#/");
+    window.location.reload();
   }, []);
 
   const extendSession = React.useCallback(
@@ -2495,7 +2571,8 @@ const App: React.FC = () => {
         return;
       }
 
-      const expiration = Date.now() + minutes * 60 * 1000;
+      // Uzatma, hareketsizlik süresinden kısa olamaz (aksi halde butona tıklamak süreyi kısaltırdı).
+      const expiration = Date.now() + Math.max(minutes, getIdleTimeoutMin()) * 60 * 1000;
       const next: AuthSnapshot = {
         token: auth.token ?? "demo-token",
         user: auth.user ?? "user",
@@ -2527,10 +2604,52 @@ const App: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [isAuthed, handleLogout]);
 
+  // Hareketsizlik zamanlayıcısı: kullanıcı etkinliğinde bitiş zamanını ayarlanan süre kadar ileri at.
+  // Yazma işlemi kısıtlanır; localStorage'a yazıldığı için diğer sekmeler de "storage" olayıyla güncellenir.
+  React.useEffect(() => {
+    if (!isAuthed) {
+      return;
+    }
+
+    let lastRefresh = 0;
+    const handleActivity = () => {
+      const now = Date.now();
+      if (now - lastRefresh < ACTIVITY_REFRESH_THROTTLE_MS) {
+        return;
+      }
+      const snapshot = getAuthFromStorage();
+      // Süresi dolmuş oturum etkinlikle diriltilmez; sayaç zaten çıkış yapacak.
+      if (!snapshot.token || snapshot.expiresAt <= now) {
+        return;
+      }
+      lastRefresh = now;
+      const expiration = Math.max(snapshot.expiresAt, now + getIdleTimeoutMin() * 60 * 1000);
+      if (expiration === snapshot.expiresAt) {
+        return;
+      }
+      const next: AuthSnapshot = { ...snapshot, expiresAt: expiration };
+      setAuthToStorage(next);
+      setAuth(next);
+      setRemainingSec(Math.floor((expiration - now) / 1000));
+    };
+
+    const options: AddEventListenerOptions = { passive: true, capture: true };
+    ACTIVITY_EVENTS.forEach((type) => window.addEventListener(type, handleActivity, options));
+    return () => {
+      ACTIVITY_EVENTS.forEach((type) => window.removeEventListener(type, handleActivity, options));
+    };
+  }, [isAuthed]);
+
   React.useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
       if ([AUTH_TOKEN_KEY, AUTH_USER_KEY, AUTH_EXPIRES_KEY].includes(event.key ?? "")) {
         const next = getAuthFromStorage();
+        // Başka sekmede çıkış yapıldı: bu sekmenin belleğindeki danışan verisini de bırak.
+        if (!next.token && event.key === AUTH_TOKEN_KEY) {
+          window.history.replaceState(null, "", "#/");
+          window.location.reload();
+          return;
+        }
         const valid = Boolean(next.token) && next.expiresAt > Date.now();
         setAuth(next);
         setIsAuthed(valid);
@@ -2573,8 +2692,7 @@ const App: React.FC = () => {
     if (!email || !password) {
       return;
     }
-    const sessionMin = loadSettings().security.sessionTimeoutMin || DEFAULT_DURATION_MIN;
-    const expiration = Date.now() + sessionMin * 60 * 1000;
+    const expiration = Date.now() + getIdleTimeoutMin() * 60 * 1000;
     const next: AuthSnapshot = {
       token: "demo-token",
       user: email,

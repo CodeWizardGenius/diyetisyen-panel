@@ -163,7 +163,7 @@ export const SecurityPanel: React.FC<Props> = ({
         <Field
           label="Oturum Zaman Aşımı (dakika)"
           htmlFor="set-timeout"
-          hint="Hareketsiz kalınan bu sürenin sonunda otomatik çıkış yapılır."
+          hint="Hareketsiz kalınan bu sürenin sonunda otomatik çıkış yapılır. Paylaşımlı bir bilgisayardaysanız profil menüsündeki “Paylaşımlı bilgisayardan çıkış yap” seçeneği danışan verilerini bu tarayıcıdan da siler."
           error={sessionTimeoutError}
         >
           <input
