@@ -53,6 +53,8 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { SettingsView } from "./components/settings/SettingsView";
 import { AlertsView } from "./components/alerts/AlertsView";
 import { LandingPage } from "./components/landing/LandingPage";
+import { LegalView, legalSlugFromPath } from "./components/landing/LegalPages";
+import { DEMO_PATIENTS, type Patient, type PatientStatus } from "./data/demo";
 import { buildAlerts, isQuietNow, timeAgoTr } from "./components/alerts/alertEngine";
 import {
   calculateBmrWithFormula,
@@ -75,19 +77,6 @@ import {
   type PatientAlert
 } from "./types/alerts";
 import { THEME_STORAGE_KEY } from "./context/ThemeContext";
-
-type PatientStatus = "Aktif" | "Risk";
-
-type Patient = {
-  id: number;
-  name: string;
-  plan: string;
-  startDate: string;
-  endDate: string;
-  compliance: number;
-  lastAction: string;
-  status: PatientStatus;
-};
 
 type Measurement = {
   id: string;
@@ -204,39 +193,6 @@ type AuthSnapshot = {
   user: string | null;
   expiresAt: number;
 };
-
-const PATIENTS: Patient[] = [
-  {
-    id: 1,
-    name: "Barış Karapelit",
-    plan: "2 Haftalık Fit Plan",
-    startDate: "2025-11-03",
-    endDate: "2025-11-17",
-    compliance: 72,
-    lastAction: "Bugün 14:05",
-    status: "Aktif"
-  },
-  {
-    id: 2,
-    name: "Elif Y.",
-    plan: "Düşük Karb Plan",
-    startDate: "2025-11-01",
-    endDate: "2025-11-15",
-    compliance: 86,
-    lastAction: "Dün 20:11",
-    status: "Aktif"
-  },
-  {
-    id: 3,
-    name: "Meriç B.",
-    plan: "Glütensiz 14G",
-    startDate: "2025-10-29",
-    endDate: "2025-11-12",
-    compliance: 54,
-    lastAction: "3 gün önce",
-    status: "Risk"
-  }
-];
 
 const MOCK_MEASUREMENTS: Record<number, Measurement[]> = {
   1: [
@@ -490,6 +446,41 @@ function useModalDismiss(onClose: () => void) {
   return ref;
 }
 
+/**
+ * Geri alınamaz işlemler (danışan/randevu silme) için erişilebilir onay penceresi.
+ * Eylem ve iptal butonları arasında odak tuzağı kurar; başlığı `aria-labelledby` ile duyurur.
+ */
+const ConfirmDialog: React.FC<{
+  title: string;
+  message: React.ReactNode;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  onConfirm: () => void;
+  onClose: () => void;
+}> = ({ title, message, confirmLabel = "Sil", cancelLabel = "Vazgeç", onConfirm, onClose }) => {
+  const dialogRef = useModalDismiss(onClose);
+  return (
+    <div
+      className="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirm-dialog-title"
+      onClick={onClose}
+    >
+      <div className="modal modal-confirm" ref={dialogRef} onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <h3 className="modal-title" id="confirm-dialog-title">{title}</h3>
+        </div>
+        <div className="modal-body">{message}</div>
+        <div className="modal-actions">
+          <button type="button" className="btn btn-outline" onClick={onClose}>{cancelLabel}</button>
+          <button type="button" className="btn btn-danger" onClick={onConfirm}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const getAuthFromStorage = (): AuthSnapshot => {
   if (typeof window === "undefined") {
     return { token: null, user: null, expiresAt: 0 };
@@ -565,6 +556,44 @@ const pathToTab = (pathname: string): AppTab => {
   return (TAB_KEYS as string[]).includes(slug) ? (slug as AppTab) : "dashboard";
 };
 
+/** Her rota için benzersiz sekme başlığı (SEO). */
+const PANEL_DOCUMENT_TITLES: Record<AppTab, string> = {
+  dashboard: "Dashboard",
+  patients: "Danışanlar",
+  plans: "Diyet Planları",
+  appointments: "Randevular",
+  alerts: "Uyarılar",
+  settings: "Ayarlar"
+};
+
+const LEGAL_DOCUMENT_TITLES: Record<string, string> = {
+  iletisim: "İletişim",
+  kvkk: "KVKK Aydınlatma Metni",
+  gizlilik: "Gizlilik Politikası",
+  "kullanim-sartlari": "Kullanım Şartları"
+};
+
+const resolveDocumentTitle = (pathname: string, isAuthed: boolean): string => {
+  const slug = pathname.replace(/^\/+|\/+$/g, "");
+  if (slug === "") {
+    return isAuthed ? "Dashboard | NutriCare" : "NutriCare | Diyetisyen Paneli";
+  }
+  if (slug === "tanitim") {
+    return "NutriCare | Diyetisyen Paneli";
+  }
+  if (slug === "giris") {
+    return "Giriş | NutriCare";
+  }
+  if (LEGAL_DOCUMENT_TITLES[slug]) {
+    return `${LEGAL_DOCUMENT_TITLES[slug]} | NutriCare`;
+  }
+  if (!isAuthed) {
+    return "Giriş | NutriCare";
+  }
+  const tabKey = (TAB_KEYS as string[]).includes(slug) ? (slug as AppTab) : "dashboard";
+  return `${PANEL_DOCUMENT_TITLES[tabKey]} | NutriCare`;
+};
+
 const StatCard: React.FC<{
   title: string;
   value: string;
@@ -589,7 +618,14 @@ const Progress: React.FC<{ value: number }> = ({ value }) => (
 );
 
 const StatusBadge: React.FC<{ status: PatientStatus }> = ({ status }) => (
-  <span className={classNames("badge", status === "Risk" ? "badge-rose" : "badge-emerald")}>
+  <span
+    className={classNames("badge", status === "Risk" ? "badge-rose" : "badge-emerald")}
+    title={
+      status === "Risk"
+        ? "Durum: Risk — uyum eşiğin altında, takip/plan güncellemesi gerekli."
+        : "Durum: Aktif — düzenli takipte, uyarı üretmeyen danışan."
+    }
+  >
     {status === "Risk" ? <TrendingDown size={12} /> : <CheckCircle2 size={12} />}
     {status}
   </span>
@@ -715,7 +751,9 @@ const PatientFormModal: React.FC<{
         ? "0–100 arası bir değer girin."
         : "",
     endDate:
-      values.endDate && values.startDate && values.endDate < values.startDate
+      values.endDate.trim() === ""
+        ? "Bitiş tarihi zorunludur."
+        : values.startDate && values.endDate < values.startDate
         ? "Bitiş, başlangıçtan önce olamaz."
         : ""
   };
@@ -731,7 +769,7 @@ const PatientFormModal: React.FC<{
       name: values.name.trim(),
       plan: values.plan.trim() || "Plan atanmadı",
       startDate: values.startDate,
-      endDate: values.endDate || values.startDate,
+      endDate: values.endDate,
       compliance: Math.round(complianceNum),
       status: values.status
     });
@@ -743,8 +781,8 @@ const PatientFormModal: React.FC<{
       <div className="modal" ref={dialogRef} onClick={(event) => event.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <h3 className="modal-title" id="patient-modal-title">{initial ? "Hasta Düzenle" : "Yeni Hasta"}</h3>
-            <p className="muted">Danışan bilgilerini girin. Ad zorunludur.</p>
+            <h3 className="modal-title" id="patient-modal-title">{initial ? "Danışan Düzenle" : "Yeni Danışan"}</h3>
+            <p className="muted">Danışan bilgilerini girin. Ad ve bitiş tarihi zorunludur.</p>
           </div>
           <button className="btn btn-outline btn-small" onClick={onClose}>Kapat</button>
         </div>
@@ -764,7 +802,7 @@ const PatientFormModal: React.FC<{
               <input id="p-start" type="date" className="input" value={values.startDate} onChange={setField("startDate")} />
             </div>
             <div>
-              <label className="label" htmlFor="p-end">Bitiş</label>
+              <label className="label" htmlFor="p-end">Bitiş *</label>
               <input id="p-end" type="date" className="input" value={values.endDate} onChange={setField("endDate")} />
               {touched && errors.endDate ? <p className="field-error">{errors.endDate}</p> : null}
             </div>
@@ -783,7 +821,7 @@ const PatientFormModal: React.FC<{
           </div>
           <div className="modal-actions">
             <button type="button" className="btn btn-outline" onClick={onClose}>Vazgeç</button>
-            <button type="submit" className="btn btn-primary">{initial ? "Kaydet" : "Hasta Ekle"}</button>
+            <button type="submit" className="btn btn-primary">{initial ? "Kaydet" : "Danışan Ekle"}</button>
           </div>
         </form>
       </div>
@@ -934,9 +972,10 @@ const MealGrid: React.FC<{
                     type="checkbox"
                     checked={done}
                     onChange={() => onToggle(dayIndex, mealIndex)}
-                    aria-label={`Gün ${dayIndex + 1} ${GRID_MEALS[mealIndex].label}`}
+                    aria-label={`${GRID_MEALS[mealIndex].label} (Gün ${dayIndex + 1}) — ${
+                      done ? "tamamlandı" : "tamamlanmadı"
+                    }`}
                   />
-                  <span className="muted">Tamamlandı</span>
                 </label>
               </td>
             ))}
@@ -1507,7 +1546,7 @@ const PatientDetailDrawer: React.FC<{
           <div className="drawer-identity">
             <span className="avatar avatar-emerald avatar-lg">{patient.name.charAt(0)}</span>
             <div>
-              <p className="muted drawer-subtitle">Hasta Detay</p>
+              <p className="muted drawer-subtitle">Danışan Detay</p>
               <h2 className="drawer-title">
                 {patient.name}
                 <span className="drawer-title-secondary"> · {patient.plan}</span>
@@ -1519,7 +1558,7 @@ const PatientDetailDrawer: React.FC<{
           </button>
         </div>
 
-        <div className="drawer-tabs" role="tablist" aria-label="Hasta detay sekmeleri">
+        <div className="drawer-tabs" role="tablist" aria-label="Danışan detay sekmeleri">
           {DRAWER_TABS.map((item) => (
             <button
               key={item.key}
@@ -1720,9 +1759,8 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
   const [items, setItems] = usePersistentState<PlanItem[]>("dp_plan_items", DEFAULT_PLAN_ITEMS);
   const [repeat, setRepeat] = usePersistentState("dp_plan_repeat", { every: 14, unit: "day" });
   const [templateName, setTemplateName] = usePersistentState("dp_plan_name", "2 Haftalık Fit Plan");
-  const [dietitian, setDietitian] = React.useState(
-    () => loadSettings().profile.dietitianName || "Uzm. Dyt. NutriCare"
-  );
+  // Diyetisyen adı sabit değil; Ayarlar > Profil & Klinik'teki gerçek isimden gelir.
+  const [dietitian, setDietitian] = React.useState(() => loadSettings().profile.dietitianName);
   const [patientId, setPatientId] = usePersistentState<number>("dp_plan_patient", patients[0]?.id ?? 1);
   const [notes, setNotes] = usePersistentState(
     "dp_plan_notes",
@@ -1853,7 +1891,7 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
       clinic: clinic.profile,
       bmrFormulaLabel: BMR_FORMULA_LABELS[bmrFormula],
       waterMl,
-      dietitian: dietitian.trim() || "Uzm. Diyetisyen",
+      dietitian: dietitian.trim() || clinic.profile.dietitianName.trim() || "Diyetisyen",
       patient: patient?.name ?? "Danışan",
       templateName: templateName.trim() || "Diyet Programı",
       date: new Date().toLocaleDateString("tr-TR"),
@@ -2184,14 +2222,34 @@ const LoginScreen: React.FC<{
   /** Tanıtım sayfasına dönüş. */
   onBack?: () => void;
 }> = ({ onLogin, onBack }) => {
-  const [email, setEmail] = React.useState("");
-  const [password, setPassword] = React.useState("");
+  // Demo giriş bilgileri ekranda hazır gelir; kullanıcı doğrudan "Giriş"e basabilir.
+  const [email, setEmail] = React.useState("demo@nutricare.com.tr");
+  const [password, setPassword] = React.useState("demo1234");
+  const emailRef = React.useRef<HTMLInputElement>(null);
+  const passwordRef = React.useRef<HTMLInputElement>(null);
   const canSubmit = email.trim() !== "" && password.trim() !== "";
+
+  // Tarayıcının autofill'i bazen React'in change olayını tetiklemez; DOM değerlerini
+  // okuyup state'e yansıtarak "Giriş" butonunun autofill sonrası da etkinleşmesini sağla.
+  const syncFromDom = React.useCallback(() => {
+    const emailValue = emailRef.current?.value ?? "";
+    const passwordValue = passwordRef.current?.value ?? "";
+    setEmail((prev) => (prev === emailValue ? prev : emailValue));
+    setPassword((prev) => (prev === passwordValue ? prev : passwordValue));
+  }, []);
+
+  React.useEffect(() => {
+    syncFromDom();
+    const timer = window.setInterval(syncFromDom, 400);
+    return () => window.clearInterval(timer);
+  }, [syncFromDom]);
 
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (canSubmit) {
-      onLogin(email, password);
+    const emailValue = emailRef.current?.value ?? email;
+    const passwordValue = passwordRef.current?.value ?? password;
+    if (emailValue.trim() !== "" && passwordValue.trim() !== "") {
+      onLogin(emailValue, passwordValue);
     }
   };
 
@@ -2204,12 +2262,14 @@ const LoginScreen: React.FC<{
             <label className="label" htmlFor="login-email">E-posta</label>
             <input
               id="login-email"
+              ref={emailRef}
               type="email"
               autoComplete="username"
               inputMode="email"
               className="input"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
+              onAnimationStart={syncFromDom}
               placeholder="you@example.com"
             />
           </div>
@@ -2217,18 +2277,23 @@ const LoginScreen: React.FC<{
             <label className="label" htmlFor="login-password">Şifre</label>
             <input
               id="login-password"
+              ref={passwordRef}
               type="password"
               autoComplete="current-password"
               className="input"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
+              onAnimationStart={syncFromDom}
               placeholder="••••••••"
             />
           </div>
           <button className="btn btn-primary" type="submit" disabled={!canSubmit}>
             Giriş
           </button>
-          <p className="muted login-hint">Demo: Herhangi bir e-posta/şifre kabul edilir.</p>
+          <p className="muted login-hint">
+            Demo giriş bilgileri hazır: <strong>demo@nutricare.com.tr</strong> / <strong>demo1234</strong>. Doğrudan
+            "Giriş"e basabilir veya herhangi bir e-posta/şifre yazabilirsiniz.
+          </p>
           {onBack ? (
             <button type="button" className="btn btn-link btn-small login-back" onClick={onBack}>
               <ChevronLeft size={14} /> Tanıtım sayfasına dön
@@ -2312,7 +2377,7 @@ const SEED_NOTIFICATIONS: AppNotification[] = [
 
 const NAV_ITEMS: Array<{ key: AppTab; label: string; icon: React.ReactNode }> = [
   { key: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={18} /> },
-  { key: "patients", label: "Hastalar", icon: <Users size={18} /> },
+  { key: "patients", label: "Danışanlar", icon: <Users size={18} /> },
   { key: "plans", label: "Diyet Planları", icon: <Salad size={18} /> },
   { key: "appointments", label: "Randevular", icon: <CalendarDays size={18} /> },
   { key: "alerts", label: "Uyarılar", icon: <Bell size={18} /> },
@@ -2650,7 +2715,7 @@ const AppointmentFormModal: React.FC<{
             <div>
               <label className="label" htmlFor="a-patient">Danışan *</label>
               <select id="a-patient" className="input" value={values.patientId ?? ""} onChange={setPatient}>
-                {values.patientId === undefined ? <option value="">{patients.length === 0 ? "Hasta yok" : "Danışan seçin"}</option> : null}
+                {values.patientId === undefined ? <option value="">{patients.length === 0 ? "Danışan yok" : "Danışan seçin"}</option> : null}
                 {patients.map((patient) => (
                   <option key={patient.id} value={patient.id}>{patient.name}</option>
                 ))}
@@ -2709,6 +2774,7 @@ const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ pa
   const [appointments, setAppointments] = usePersistentState<Appointment[]>(APPOINTMENTS_STORAGE_KEY, SEED_APPOINTMENTS);
   const [modalOpen, setModalOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Appointment | null>(null);
+  const [apptToDelete, setApptToDelete] = React.useState<Appointment | null>(null);
 
   // Eski (yalnızca ad tutan) kayıtlara danışan kimliğini bir kez ekle.
   React.useEffect(() => {
@@ -2763,8 +2829,16 @@ const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ pa
     );
   };
 
-  const handleDelete = (id: string) => {
-    setAppointments((prev) => prev.filter((appt) => appt.id !== id));
+  const handleDelete = (appt: Appointment) => {
+    setApptToDelete(appt);
+  };
+
+  const confirmDelete = () => {
+    if (!apptToDelete) {
+      return;
+    }
+    setAppointments((prev) => prev.filter((item) => item.id !== apptToDelete.id));
+    setApptToDelete(null);
   };
 
   return (
@@ -2788,7 +2862,7 @@ const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ pa
           <table>
             <thead>
               <tr>
-                <th>Hasta</th>
+                <th>Danışan</th>
                 <th>Tarih</th>
                 <th>Saat</th>
                 <th>Tür</th>
@@ -2811,7 +2885,7 @@ const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ pa
                   <td style={{ textAlign: "right" }}>
                     <div className="row-actions">
                       <button className="btn btn-outline btn-small" onClick={() => openEdit(appt)}>Düzenle</button>
-                      <button className="icon-btn" aria-label="Randevuyu sil" onClick={() => handleDelete(appt.id)}>
+                      <button className="icon-btn" aria-label="Randevuyu sil" onClick={() => handleDelete(appt)}>
                         <Trash2 size={15} />
                       </button>
                     </div>
@@ -2830,6 +2904,23 @@ const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ pa
           initial={editing ?? undefined}
           onClose={() => setModalOpen(false)}
           onSubmit={handleSubmit}
+        />
+      ) : null}
+
+      {apptToDelete ? (
+        <ConfirmDialog
+          title="Randevuyu sil"
+          message={
+            <>
+              <p>
+                <strong>{displayName(apptToDelete)}</strong> için {apptToDelete.date} {apptToDelete.time} randevusu
+                silinsin mi?
+              </p>
+              <p className="muted">Bu işlem geri alınamaz.</p>
+            </>
+          }
+          onConfirm={confirmDelete}
+          onClose={() => setApptToDelete(null)}
         />
       ) : null}
     </div>
@@ -3168,11 +3259,12 @@ const App: React.FC = () => {
   );
 
   const [query, setQuery] = React.useState("");
-  const [patients, setPatients] = usePersistentState<Patient[]>("dp_patients", PATIENTS);
+  const [patients, setPatients] = usePersistentState<Patient[]>("dp_patients", DEMO_PATIENTS);
   const [selectedPatient, setSelectedPatient] = React.useState<Patient | null>(null);
   const [showDetail, setShowDetail] = React.useState(false);
   const [patientModalOpen, setPatientModalOpen] = React.useState(false);
   const [editingPatient, setEditingPatient] = React.useState<Patient | null>(null);
+  const [patientToDelete, setPatientToDelete] = React.useState<Patient | null>(null);
 
   const [auth, setAuth] = React.useState<AuthSnapshot>(() => getAuthFromStorage());
   const [isAuthed, setIsAuthed] = React.useState(() => {
@@ -3418,24 +3510,23 @@ const App: React.FC = () => {
     [setTab]
   );
 
-  const handleDeletePatient = React.useCallback(
-    (patient: Patient) => {
-      if (
-        !window.confirm(
-          `${patient.name} silinsin mi? Danışanın ölçüm geçmişi, randevuları, planı ve notları da kaldırılır.`
-        )
-      ) {
-        return;
-      }
-      setPatients((prev) => prev.filter((item) => item.id !== patient.id));
-      updateStoredAppointments((appointments) => appointments.filter((appt) => !isAppointmentOf(appt, patient)));
-      removePatientLocalData(patient.id);
-      if (selectedPatient?.id === patient.id) {
-        setShowDetail(false);
-      }
-    },
-    [setPatients, selectedPatient]
-  );
+  const handleDeletePatient = React.useCallback((patient: Patient) => {
+    setPatientToDelete(patient);
+  }, []);
+
+  const confirmDeletePatient = React.useCallback(() => {
+    const patient = patientToDelete;
+    if (!patient) {
+      return;
+    }
+    setPatients((prev) => prev.filter((item) => item.id !== patient.id));
+    updateStoredAppointments((appointments) => appointments.filter((appt) => !isAppointmentOf(appt, patient)));
+    removePatientLocalData(patient.id);
+    if (selectedPatient?.id === patient.id) {
+      setShowDetail(false);
+    }
+    setPatientToDelete(null);
+  }, [patientToDelete, setPatients, selectedPatient]);
 
   const handleImportData = React.useCallback(
     (raw: unknown): { ok: boolean; message: string } => {
@@ -3593,9 +3684,21 @@ const App: React.FC = () => {
     }
   }, [isAuthed, location.pathname, navigate]);
 
+  // SEO: her rota için benzersiz sekme başlığı.
+  React.useEffect(() => {
+    document.title = resolveDocumentTitle(location.pathname, isAuthed);
+  }, [location.pathname, isAuthed]);
+
   // Tanıtım sayfası: giriş yapılmamışken kök adreste, her zaman #/tanitim adresinde.
   // Diğer adreslerde (örn. süresi dolan oturumda #/settings) doğrudan giriş ekranı açılır.
   const routePath = location.pathname.replace(/\/+$/, "") || "/";
+
+  // Yasal/iletişim sayfaları herkese açıktır (giriş yapılmış olsa da erişilebilir).
+  const legalSlug = legalSlugFromPath(routePath);
+  if (legalSlug) {
+    return <LegalView slug={legalSlug} homeHref="#/" />;
+  }
+
   if (routePath === "/tanitim" || (!isAuthed && routePath === "/")) {
     return <LandingPage isAuthed={isAuthed} onStart={() => navigate(isAuthed ? "/" : "/giris")} />;
   }
@@ -3605,8 +3708,8 @@ const App: React.FC = () => {
   }
 
   const pageTitles: Record<AppTab, { title: string; desc: string }> = {
-    dashboard: { title: "Dashboard", desc: "Uyum, öğünler ve hasta özeti" },
-    patients: { title: "Hastalar", desc: "Tüm danışanlar ve uyum durumları" },
+    dashboard: { title: "Dashboard", desc: "Uyum, öğünler ve danışan özeti" },
+    patients: { title: "Danışanlar", desc: "Tüm danışanlar ve uyum durumları" },
     plans: { title: "Diyet Planları", desc: "Şablonları sürükle-bırak ile düzenleyin" },
     appointments: { title: "Randevular", desc: "Kontrol ve görüşme takvimi" },
     alerts: { title: "Uyarılar", desc: "Eşikler, sessize alma ve otomasyon" },
@@ -3616,9 +3719,9 @@ const App: React.FC = () => {
   // Global arama yalnızca filtrelenebilir bir listesi olan sekmelerde gösterilir.
   // (Planlar/Ayarlar: filtrelenecek liste yok · Uyarılar: kendi aramasına sahip.)
   const searchPlaceholders: Partial<Record<AppTab, string>> = {
-    dashboard: "Hasta ara...",
-    patients: "Hasta ara...",
-    appointments: "Randevu ara (hasta veya tür)..."
+    dashboard: "Danışan ara...",
+    patients: "Danışan ara...",
+    appointments: "Randevu ara (danışan veya tür)..."
   };
   const showSearch = tab in searchPlaceholders;
   const searchPlaceholder = searchPlaceholders[tab] ?? "Ara...";
@@ -3666,9 +3769,9 @@ const App: React.FC = () => {
             </div>
             {tab === "patients" ? (
               <div className="page-head-actions">
-                <span className="badge badge-rose"><TrendingDown size={12} /> {riskCount} riskli hasta</span>
+                <span className="badge badge-rose"><TrendingDown size={12} /> {riskCount} riskli danışan</span>
                 <button className="btn btn-primary btn-small" onClick={openAddPatient}>
-                  <Plus size={14} /> Yeni Hasta
+                  <Plus size={14} /> Yeni Danışan
                 </button>
               </div>
             ) : null}
@@ -3677,11 +3780,15 @@ const App: React.FC = () => {
           {tab === "dashboard" && (
             <section className="tab-panel">
               <div className="grid grid-md-4">
-                <StatCard title="Toplam Hasta" value={String(dashboardStats.total)} subtitle={`${dashboardStats.active} aktif danışan`} tone="emerald" icon={<Users size={18} />} />
+                <StatCard title="Toplam Danışan" value={String(dashboardStats.total)} subtitle={`${dashboardStats.active} aktif · ${riskCount} riskli`} tone="emerald" icon={<Users size={18} />} />
                 <StatCard title="Ortalama Uyum" value={`%${dashboardStats.avgCompliance}`} subtitle="Tüm danışanlar" tone="mint" icon={<CheckCircle2 size={18} />} />
                 <StatCard title="Riskli Danışan" value={String(riskCount)} subtitle={riskCount > 0 ? "Takip gerekli" : "Risk yok"} tone="slate" icon={<TrendingDown size={18} />} />
                 <StatCard title="Yaklaşan Randevu" value={String(dashboardStats.upcomingAppointments)} subtitle="Bugün ve sonrası" tone="amber" icon={<CalendarDays size={18} />} />
               </div>
+              <p className="muted stat-legend">
+                Durum rozetleri: <strong>Aktif</strong> düzenli takipteki danışanı, <strong>Risk</strong> uyum
+                eşiğinin altına düşen danışanı gösterir. Toplam danışan = aktif + riskli.
+              </p>
 
               <div className="grid grid-lg-5 dashboard-charts">
                 <div className="card chart-card span-3">
@@ -3734,14 +3841,14 @@ const App: React.FC = () => {
 
               <div className="card">
                 <div className="card-head">
-                  <h3>Hızlı Hasta Görünümü</h3>
+                  <h3>Hızlı Danışan Görünümü</h3>
                   <span className="muted">{filteredPatients.length} kayıt</span>
                 </div>
                 <div className="table-scroll">
                   <table>
                     <thead>
                       <tr>
-                        <th>Hasta</th>
+                        <th>Danışan</th>
                         <th>Plan</th>
                         <th>Tarih</th>
                         <th>Uyum</th>
@@ -3767,8 +3874,8 @@ const App: React.FC = () => {
                 <div className="card">
                   <p className="muted">
                     {query.trim()
-                      ? `"${query}" ile eşleşen hasta yok.`
-                      : 'Henüz hasta yok. "Yeni Hasta" ile ekleyin.'}
+                      ? `"${query}" ile eşleşen danışan yok.`
+                      : 'Henüz danışan yok. "Yeni Danışan" ile ekleyin.'}
                   </p>
                 </div>
               ) : (
@@ -3853,6 +3960,24 @@ const App: React.FC = () => {
             initial={editingPatient ?? undefined}
             onClose={() => setPatientModalOpen(false)}
             onSubmit={handleSavePatient}
+          />
+        ) : null}
+
+        {patientToDelete ? (
+          <ConfirmDialog
+            title="Danışanı sil"
+            message={
+              <>
+                <p>
+                  <strong>{patientToDelete.name}</strong> adlı danışan silinsin mi?
+                </p>
+                <p className="muted">
+                  Danışanın ölçüm geçmişi, randevuları, planı ve notları da kaldırılır. Bu işlem geri alınamaz.
+                </p>
+              </>
+            }
+            onConfirm={confirmDeletePatient}
+            onClose={() => setPatientToDelete(null)}
           />
         ) : null}
       </div>

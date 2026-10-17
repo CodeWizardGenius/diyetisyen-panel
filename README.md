@@ -2,12 +2,12 @@
 
 Diyetisyenler için danışan takibi, ölçüm geçmişi, diyet planı oluşturma ve uyarı yönetimi sağlayan tek sayfalık (SPA) yönetim paneli. React + TypeScript + Vite ile geliştirilmiştir.
 
-> Not: Bu bir **demo**'dur. Başlangıç verileri statik mock'tur ve gerçek bir backend yoktur; giriş ekranı herhangi bir e-posta/şifre kombinasyonunu kabul eder. Oturum, hastalar, randevular, ölçümler ve diyet planı düzenleyicisinin içeriği tarayıcının `localStorage`'ında saklanır (sayfa yenilense de korunur).
+> Not: Bu bir **demo**'dur. Başlangıç verileri statik mock'tur ve gerçek bir backend yoktur; giriş ekranı herhangi bir e-posta/şifre kombinasyonunu kabul eder. Oturum, danışanlar, randevular, ölçümler ve diyet planı düzenleyicisinin içeriği tarayıcının `localStorage`'ında saklanır (sayfa yenilense de korunur).
 
 ## Özellikler
 
-- **Dashboard** — uyum yüzdesi ve öğün tamamlama grafikleri, hızlı hasta tablosu.
-- **Hastalar** — danışan ekleme/düzenleme (ad, plan, tarih, uyum, durum), kartlardan detay görüntüleme ve plana atama.
+- **Dashboard** — uyum yüzdesi ve öğün tamamlama grafikleri, hızlı danışan tablosu.
+- **Danışanlar** — danışan ekleme/düzenleme (ad, plan, tarih, uyum, durum), kartlardan detay görüntüleme ve plana atama.
 - **Ölçüm takibi** — kilo, yağ oranı, kas kütlesi, bel/kalça girişi; canlı VKİ (BMI) hesabı ve validasyon.
 - **Diyet planları** — sürükle-bırak öğün düzenleyici, BMR/TDEE ve makro hesaplayıcı.
 - **Randevular** — randevu oluşturma, düzenleme ve silme; tarihe göre sıralı liste.

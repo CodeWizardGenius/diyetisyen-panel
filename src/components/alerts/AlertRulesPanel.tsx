@@ -124,13 +124,13 @@ export const AlertRulesPanel: React.FC<Props> = ({ rules, onChange, onSave, onRe
             <ul className="set-auto-list">
               <li>
                 <div>
-                  <strong>Kaçan öğünde hastaya push</strong>
+                  <strong>Kaçan öğünde danışana push</strong>
                   <p className="muted muted-tight">48 saatte 3 öğün kaçarsa danışanı anında bilgilendir.</p>
                 </div>
                 <Toggle
                   checked={rules.autoNotifyPatient}
                   onChange={(checked) => onChange({ autoNotifyPatient: checked })}
-                  label="Hastaya otomatik bildirim"
+                  label="Danışana otomatik bildirim"
                 />
               </li>
               <li>

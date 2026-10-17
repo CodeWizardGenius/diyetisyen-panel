@@ -109,10 +109,14 @@ const daysUntil = (endDate: string, now: number): number | null => {
   return Math.round((endMid - todayMid) / 86_400_000);
 };
 
+/** Danışana gerçek bir plan atanmış mı? ("Plan atanmadı" yer tutucusu plan sayılmaz.) */
+const hasAssignedPlan = (plan: string): boolean => Boolean(plan && plan.trim() && plan.trim() !== "Plan atanmadı");
+
 /**
  * Her danışanın gerçek `endDate`'ini bugünle karşılaştırır ve kuraldaki
  * hatırlatma penceresine göre uyarı üretir: süresi geçmiş → kritik,
  * bugün/yarın → uyarı, pencere içindeki diğer günler → bilgi.
+ * Plan atanmamışsa plan adı cümleye gömülmez; dilbilgisel olarak doğru bir uyarı kurulur.
  */
 const derivePlanExpirationAlerts = (
   patients: EnginePatient[],
@@ -125,6 +129,7 @@ const derivePlanExpirationAlerts = (
     if (left === null) {
       continue;
     }
+    const planAssigned = hasAssignedPlan(patient.plan);
 
     if (left < 0) {
       alerts.push({
@@ -134,8 +139,10 @@ const derivePlanExpirationAlerts = (
         patientPlan: patient.plan,
         severity: "critical",
         category: "plan_expiration",
-        title: "Plan süresi doldu",
-        description: `${patient.plan} planı ${patient.endDate} tarihinde sona erdi — yenileme veya yeni plan gerekiyor.`,
+        title: planAssigned ? "Plan süresi doldu" : "Plan atanmadı",
+        description: planAssigned
+          ? `${patient.plan} planı ${patient.endDate} tarihinde sona erdi — yenileme veya yeni plan gerekiyor.`
+          : "Bu danışana henüz bir plan atanmadı. Danışan için yeni bir beslenme planı oluşturulmalı.",
         timestamp: minutesAgoIso(now, 40 + patient.id * 7),
         isResolved: false
       });
@@ -143,6 +150,21 @@ const derivePlanExpirationAlerts = (
     }
 
     if (left <= rules.planExpiryNoticeDays) {
+      if (!planAssigned) {
+        alerts.push({
+          id: `exp-${patient.id}`,
+          patientId: patient.id,
+          patientName: patient.name,
+          patientPlan: patient.plan,
+          severity: "info",
+          category: "plan_expiration",
+          title: "Plan atanmadı",
+          description: "Bu danışana henüz bir plan atanmadı. Yaklaşan dönem için plan hazırlanmalı.",
+          timestamp: minutesAgoIso(now, 150 + patient.id * 9),
+          isResolved: false
+        });
+        continue;
+      }
       const remainingText = left === 0 ? "bugün" : left === 1 ? "yarın" : `${left} gün sonra`;
       alerts.push({
         id: `exp-${patient.id}`,

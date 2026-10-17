@@ -21,7 +21,7 @@ export const ProfilePanel: React.FC<Props> = ({ draft, updateSection }) => {
     <>
       <SectionCard
         title="Diyetisyen Bilgileri"
-        description="Bu bilgiler diyet listesi PDF çıktısında ve hasta ekranlarında görünür."
+        description="Bu bilgiler diyet listesi PDF çıktısında ve danışan ekranlarında görünür."
         icon={<User size={15} />}
       >
         <div className="set-grid-2">

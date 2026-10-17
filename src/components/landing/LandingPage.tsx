@@ -10,10 +10,14 @@ import {
   Info,
   Leaf,
   LineChart,
+  Mail,
   ShieldCheck,
   UserPlus,
   Users
 } from "lucide-react";
+import { DEMO_PATIENTS, DEMO_STATS } from "../../data/demo";
+import { LEGAL_LINKS, SUPPORT_EMAIL } from "./LegalPages";
+import { classNames } from "../settings/classNames";
 
 interface Props {
   /** Ana çağrı butonu: giriş yapılmamışsa giriş ekranına, yapılmışsa panele götürür. */
@@ -126,40 +130,28 @@ export const LandingPage: React.FC<Props> = ({ onStart, isAuthed }) => {
               <div className="lp-preview-stats">
                 <div>
                   <small>Ortalama uyum</small>
-                  <strong>%78</strong>
-                  <span className="lp-bar"><span style={{ width: "78%" }} /></span>
+                  <strong>%{DEMO_STATS.avgCompliance}</strong>
+                  <span className="lp-bar"><span style={{ width: `${DEMO_STATS.avgCompliance}%` }} /></span>
                 </div>
                 <div>
                   <small>Riskli danışan</small>
-                  <strong>2</strong>
+                  <strong>{DEMO_STATS.risk}</strong>
                   <span className="lp-pill lp-pill-rose">takipte</span>
                 </div>
               </div>
               <ul className="lp-preview-list">
-                <li>
-                  <span className="lp-avatar">A</span>
-                  <span>
-                    <strong>Ayşe K.</strong>
-                    <small>2 Haftalık Fit Plan</small>
-                  </span>
-                  <span className="lp-pill">%86</span>
-                </li>
-                <li>
-                  <span className="lp-avatar">M</span>
-                  <span>
-                    <strong>Mehmet T.</strong>
-                    <small>Düşük Karbonhidrat</small>
-                  </span>
-                  <span className="lp-pill lp-pill-rose">%54</span>
-                </li>
-                <li>
-                  <span className="lp-avatar">Z</span>
-                  <span>
-                    <strong>Zeynep A.</strong>
-                    <small>Glütensiz 14G</small>
-                  </span>
-                  <span className="lp-pill">%91</span>
-                </li>
+                {DEMO_PATIENTS.map((patient) => (
+                  <li key={patient.id}>
+                    <span className="lp-avatar">{patient.name.charAt(0)}</span>
+                    <span>
+                      <strong>{patient.name}</strong>
+                      <small>{patient.plan}</small>
+                    </span>
+                    <span className={classNames("lp-pill", patient.status === "Risk" && "lp-pill-rose")}>
+                      %{patient.compliance}
+                    </span>
+                  </li>
+                ))}
               </ul>
             </div>
           </div>
@@ -227,8 +219,18 @@ export const LandingPage: React.FC<Props> = ({ onStart, isAuthed }) => {
       </main>
 
       <footer className="lp-footer">
-        <div className="lp-container">
-          © {new Date().getFullYear()} NutriCare · Diyetisyen Paneli
+        <div className="lp-container legal-footer">
+          <p>© {new Date().getFullYear()} NutriCare · Diyetisyen Paneli</p>
+          <nav className="legal-footer-links" aria-label="Yasal bağlantılar">
+            {LEGAL_LINKS.map((link) => (
+              <a key={link.slug} href={`#/${link.slug}`}>
+                {link.label}
+              </a>
+            ))}
+          </nav>
+          <p className="legal-contact">
+            <Mail size={14} /> İletişim: <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a>
+          </p>
         </div>
       </footer>
     </div>

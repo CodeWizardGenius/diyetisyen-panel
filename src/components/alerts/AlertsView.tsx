@@ -411,7 +411,7 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, onOpenP
             <div className="search alerts-search">
               <Search size={15} className="search-icon" />
               <input
-                placeholder="Hasta, başlık veya açıklama ara..."
+                placeholder="Danışan, başlık veya açıklama ara..."
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 aria-label="Uyarı ara"
