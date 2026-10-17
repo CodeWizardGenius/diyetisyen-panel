@@ -3016,11 +3016,9 @@ const DrawerPlanTab: React.FC<{ patient: Patient; onUpdatePatient: UpdatePatient
     const next = grid.map((row, d) => (d === day ? row.map((done, m) => (m === meal ? !done : done)) : row));
     setGrid(next);
     writeMealGrid(patient.id, next);
-    // Çizelge uyumun kaynağıdır: yalnızca geçen günler hesaba katılır.
-    const nextCompliance = gridCompliance(next, elapsed);
-    if (nextCompliance !== null) {
-      onUpdatePatient(patient.id, { compliance: nextCompliance, lastAction: "Öğün çizelgesi güncellendi" });
-    }
+    // Öğün çizelgesi kaydedilen "Uyum" değerini ezmez; tamamlama oranı yalnızca
+    // "Çizelgeye göre uyum" metriği olarak gösterilir. Uyum elle (danışan formu) güncellenir.
+    onUpdatePatient(patient.id, { lastAction: "Öğün çizelgesi güncellendi" });
   };
 
   const handleAssign = () => {
@@ -3057,7 +3055,10 @@ const DrawerPlanTab: React.FC<{ patient: Patient; onUpdatePatient: UpdatePatient
       <div className="card">
         <div className="card-head">
           <h3><UtensilsCrossed size={15} /> 14 Günlük Çizelge</h3>
-          <span className="muted">
+          <span
+            className="muted"
+            title="Öğün çizelgesindeki işaretlerden hesaplanır; danışanın kayıtlı Uyum değerini değiştirmez."
+          >
             {compliance === null ? "Plan henüz başlamadı" : `Çizelgeye göre uyum %${compliance} · ${elapsed}/${PLAN_DAYS} gün`}
           </span>
         </div>

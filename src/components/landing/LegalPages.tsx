@@ -85,7 +85,7 @@ const CONTENT: Record<LegalSlug, LegalContent> = {
       {
         heading: "4. Hukuki sebepler",
         paragraphs: [
-          "Sağlık verileri KVKK kapsamında özel nitelikli kişisel veri olup, kural olarak kural olarak açık rızanız olmadan işlenemez. Bu veriler; beslenme ve diyet hizmetinin sunulabilmesi için yalnızca gerekli olduğu ölçüde ve açık rızanıza dayanılarak işlenir. Diğer kişisel veriler ise KVKK madde 5 kapsamında sözleşmenin kurulması/ifası, hukuki yükümlülüklerin yerine getirilmesi ve meşru menfaat hukuki sebeplerine dayanılarak işlenir."
+          "Sağlık verileri KVKK kapsamında özel nitelikli kişisel veri olup, kural olarak açık rızanız olmadan işlenemez. Bu veriler; beslenme ve diyet hizmetinin sunulabilmesi için yalnızca gerekli olduğu ölçüde ve açık rızanıza dayanılarak işlenir. Diğer kişisel veriler ise KVKK madde 5 kapsamında sözleşmenin kurulması/ifası, hukuki yükümlülüklerin yerine getirilmesi ve meşru menfaat hukuki sebeplerine dayanılarak işlenir."
         ]
       },
       {
