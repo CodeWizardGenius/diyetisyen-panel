@@ -157,6 +157,17 @@ export const AlertRulesPanel: React.FC<Props> = ({ rules, onChange, onSave, onRe
               accent="#0891b2"
               onChange={(value) => onChange({ waterGoalMl: value })}
             />
+            <SliderField
+              id="rule-package"
+              label="Paket Bitiş Bildirimi"
+              hint="Paket bitişine bu kadar gün kala uyarı ve ödeme hatırlatması üretilir."
+              min={0}
+              max={30}
+              value={rules.packageExpiryNoticeDays}
+              valueLabel={`${rules.packageExpiryNoticeDays} gün`}
+              accent="#8b5cf6"
+              onChange={(value) => onChange({ packageExpiryNoticeDays: value })}
+            />
           </div>
         </SectionCard>
 

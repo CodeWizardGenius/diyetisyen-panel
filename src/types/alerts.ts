@@ -7,6 +7,7 @@ export type AlertCategory =
   | "adherence"
   | "missed_meal"
   | "plan_expiration"
+  | "package_expiration"
   | "weight_plateau"
   | "weight_gain"
   | "inactivity"
@@ -39,6 +40,8 @@ export type AlertRules = {
   waterMissDays: number; // e.g. 3 days
   /** Günlük su hedefi (ml) — danışan kendi hedefini belirtmezse kullanılır. */
   waterGoalMl: number; // e.g. 2000 ml
+  /** Paket bitişine kaç gün kala uyarı üretilsin. */
+  packageExpiryNoticeDays: number; // e.g. 7 days
   quietHoursEnabled: boolean;
   quietHoursRange: [string, string]; // ["23:00", "07:00"]
   autoNotifyPatient: boolean;
@@ -59,6 +62,7 @@ export const DEFAULT_ALERT_RULES: AlertRules = {
   weightGainWeeks: 2,
   waterMissDays: 3,
   waterGoalMl: 2000,
+  packageExpiryNoticeDays: 7,
   quietHoursEnabled: true,
   quietHoursRange: ["23:00", "07:00"],
   autoNotifyPatient: true,
@@ -119,6 +123,10 @@ export const loadAlertRules = (fallback?: AlertRules): AlertRules => {
       weightGainWeeks: typeof parsed.weightGainWeeks === "number" ? (parsed.weightGainWeeks as number) : base.weightGainWeeks,
       waterMissDays: typeof parsed.waterMissDays === "number" ? (parsed.waterMissDays as number) : base.waterMissDays,
       waterGoalMl: typeof parsed.waterGoalMl === "number" ? (parsed.waterGoalMl as number) : base.waterGoalMl,
+      packageExpiryNoticeDays:
+        typeof parsed.packageExpiryNoticeDays === "number"
+          ? (parsed.packageExpiryNoticeDays as number)
+          : base.packageExpiryNoticeDays,
       quietHoursEnabled: parsed.quietHoursEnabled as boolean,
       quietHoursRange: (parsed.quietHoursRange as [string, string]).slice(0, 2) as [string, string],
       autoNotifyPatient: parsed.autoNotifyPatient as boolean,
@@ -212,6 +220,7 @@ export const CATEGORY_META: Record<AlertCategory, { label: string }> = {
   adherence: { label: "Uyum" },
   missed_meal: { label: "Kaçan Öğün" },
   plan_expiration: { label: "Plan Bitişi" },
+  package_expiration: { label: "Paket & Ödeme" },
   weight_plateau: { label: "Kilo Platosu" },
   weight_gain: { label: "Kilo Artışı" },
   inactivity: { label: "Veri Akışı" },

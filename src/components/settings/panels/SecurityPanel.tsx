@@ -117,7 +117,11 @@ export const SecurityPanel: React.FC<Props> = ({
       exportedBy: dietitianName,
       patients: patients.map((patient) => ({
         ...patient,
-        measurements: getMeasurements(patient.id)
+        measurements: getMeasurements(patient.id).map((measurement) => ({
+          ...measurement,
+          patientId: patient.id,
+          patientName: patient.name
+        }))
       }))
     };
     downloadFile(
@@ -129,10 +133,10 @@ export const SecurityPanel: React.FC<Props> = ({
   };
 
   const exportCsv = () => {
-    const header = "danisan;plan;uyum;durum;tarih;kilo_kg;boy_cm;yag_yuzde;kas_kg;bel_cm;kalca_cm;not";
+    const header = "danisan_id;danisan;plan;uyum;durum;tarih;kilo_kg;boy_cm;yag_yuzde;kas_kg;bel_cm;kalca_cm;not";
     const lines = patients.flatMap((patient) => {
       const rows = getMeasurements(patient.id);
-      const base = [patient.name, patient.plan, patient.compliance, patient.status];
+      const base = [patient.id, patient.name, patient.plan, patient.compliance, patient.status];
       if (rows.length === 0) {
         return [csvRow([...base, "", "", "", "", "", "", "", ""])];
       }

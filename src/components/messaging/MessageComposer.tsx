@@ -28,6 +28,11 @@ export const MESSAGE_TEMPLATES = [
     id: "randevu",
     label: "Randevu hatırlatma",
     text: "Merhaba! Yaklaşan randevunu hatırlatmak istedim. Uygun olmadığın bir saat varsa bana yazabilirsin."
+  },
+  {
+    id: "odeme",
+    label: "Ödeme / paket hatırlatma",
+    text: "Merhaba! Takip paketinizin süresi yakında doluyor. Kesintisiz devam edebilmemiz için paket yenileme ödemesini tamamlayabilir misiniz? Sorularınız için buradayım."
   }
 ] as const;
 

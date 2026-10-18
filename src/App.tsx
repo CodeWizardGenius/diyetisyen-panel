@@ -58,6 +58,9 @@ import { AlertsView } from "./components/alerts/AlertsView";
 import { LandingPage } from "./components/landing/LandingPage";
 import { LegalView, legalSlugFromPath } from "./components/landing/LegalPages";
 import { ActivityFeed } from "./components/dashboard/ActivityFeed";
+import { WeeklyReport } from "./components/reports/WeeklyReport";
+import { AppointmentRequestPage } from "./components/appointments/AppointmentRequestPage";
+import { buildAppointmentRequestUrl } from "./types/patientLinks";
 import { PriorityList } from "./components/dashboard/PriorityList";
 import { buildPriorityList } from "./components/dashboard/priority";
 import { PatientTimeline } from "./components/patient/PatientTimeline";
@@ -75,7 +78,7 @@ import {
   type ConsentStatus,
   type MobileEvent
 } from "./types/mobileData";
-import { DEMO_PATIENTS, type Patient, type PatientStatus } from "./data/demo";
+import { DEMO_PATIENTS, type Patient, type PatientPackage, type PatientStatus } from "./data/demo";
 import { buildAlerts, isQuietNow, timeAgoTr } from "./components/alerts/alertEngine";
 import {
   calculateBmrWithFormula,
@@ -91,6 +94,7 @@ import {
 } from "./types/settings";
 import {
   ALERT_RULES_STORAGE_KEY,
+  DEFAULT_ALERT_RULES,
   loadAlertRules,
   loadDismissedIds,
   loadResolvedIds,
@@ -718,6 +722,12 @@ const PatientCard: React.FC<{
         <div className="value-strong">{patient.endDate}</div>
       </div>
     </div>
+    {patient.package ? (
+      <div className="package-line">
+        <span className="package-badge">Paket</span>
+        <span className="muted package-line-text">{packageSummary(patient.package)}</span>
+      </div>
+    ) : null}
     <div>
       <label className="label">Uyum</label>
       <div className="patient-card-progress">
@@ -745,6 +755,22 @@ type PatientDraft = {
   endDate: string;
   compliance: number;
   status: PatientStatus;
+  package?: PatientPackage;
+};
+
+/** Paket satırı özet metni: "Paket adı · kalan X seans · Y gün (bitiş)". */
+const packageSummary = (pkg: PatientPackage, now: number = Date.now()): string => {
+  const parts = pkg.endDate.split("-").map(Number);
+  let days = null as number | null;
+  if (parts.length === 3 && parts.every((part) => !Number.isNaN(part))) {
+    const [year, month, day] = parts;
+    const endMid = new Date(year, month - 1, day).getTime();
+    const nowDate = new Date(now);
+    const todayMid = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate()).getTime();
+    days = Math.round((endMid - todayMid) / 86_400_000);
+  }
+  const remaining = days === null ? "" : days < 0 ? " · süresi doldu" : days === 0 ? " · bugün bitiyor" : ` · ${days} gün`;
+  return `${pkg.name} · kalan ${pkg.sessionsLeft}/${pkg.sessionsTotal} seans${remaining} (bitiş ${pkg.endDate})`;
 };
 
 const PatientFormModal: React.FC<{
@@ -760,7 +786,11 @@ const PatientFormModal: React.FC<{
     startDate: initial?.startDate ?? today,
     endDate: initial?.endDate ?? "",
     compliance: initial ? String(initial.compliance) : "0",
-    status: (initial?.status ?? "Aktif") as PatientStatus
+    status: (initial?.status ?? "Aktif") as PatientStatus,
+    pkgName: initial?.package?.name ?? "",
+    pkgTotal: initial?.package ? String(initial.package.sessionsTotal) : "8",
+    pkgLeft: initial?.package ? String(initial.package.sessionsLeft) : "8",
+    pkgEnd: initial?.package?.endDate ?? ""
   }));
   const [touched, setTouched] = React.useState(false);
 
@@ -769,6 +799,9 @@ const PatientFormModal: React.FC<{
   ) => setValues((prev) => ({ ...prev, [key]: event.target.value }));
 
   const complianceNum = Number(values.compliance);
+  const pkgTotalNum = Number(values.pkgTotal);
+  const pkgLeftNum = Number(values.pkgLeft);
+  const packageActive = values.pkgName.trim() !== "" || values.pkgEnd.trim() !== "";
   const errors = {
     name: values.name.trim() === "" ? "Ad zorunludur." : "",
     compliance:
@@ -780,9 +813,19 @@ const PatientFormModal: React.FC<{
         ? "Bitiş tarihi zorunludur."
         : values.startDate && values.endDate < values.startDate
         ? "Bitiş, başlangıçtan önce olamaz."
+        : "",
+    pkgName: packageActive && values.pkgName.trim() === "" ? "Paket adı zorunludur." : "",
+    pkgEnd: packageActive && values.pkgEnd.trim() === "" ? "Paket bitiş tarihi zorunludur." : "",
+    pkgSessions:
+      packageActive && (!Number.isInteger(pkgTotalNum) || pkgTotalNum < 1)
+        ? "Seans sayısı en az 1 olmalı."
+        : packageActive && (!Number.isInteger(pkgLeftNum) || pkgLeftNum < 0 || pkgLeftNum > pkgTotalNum)
+        ? "Kalan seans 0 ile toplam arasında olmalı."
         : ""
   };
-  const invalid = Boolean(errors.name || errors.compliance || errors.endDate);
+  const invalid = Boolean(
+    errors.name || errors.compliance || errors.endDate || errors.pkgName || errors.pkgEnd || errors.pkgSessions
+  );
 
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -796,7 +839,16 @@ const PatientFormModal: React.FC<{
       startDate: values.startDate,
       endDate: values.endDate,
       compliance: Math.round(complianceNum),
-      status: values.status
+      status: values.status,
+      package:
+        values.pkgName.trim() !== "" && values.pkgEnd.trim() !== ""
+          ? {
+              name: values.pkgName.trim(),
+              sessionsTotal: pkgTotalNum,
+              sessionsLeft: pkgLeftNum,
+              endDate: values.pkgEnd
+            }
+          : undefined
     });
     onClose();
   };
@@ -842,6 +894,32 @@ const PatientFormModal: React.FC<{
                 <option value="Aktif">Aktif</option>
                 <option value="Risk">Risk</option>
               </select>
+            </div>
+            <div className="form-full package-fieldset">
+              <span className="label">Takip Paketi (opsiyonel)</span>
+              <p className="muted package-hint">Paket tanımlarsanız bitişe {`${DEFAULT_ALERT_RULES.packageExpiryNoticeDays}`} gün kala uyarı ve ödeme hatırlatması üretilir.</p>
+              <div className="form-grid">
+                <div className="form-full">
+                  <label className="label" htmlFor="p-pkg-name">Paket Adı</label>
+                  <input id="p-pkg-name" className="input" placeholder="örn. 8 Seans Klinik Paketi" value={values.pkgName} onChange={setField("pkgName")} />
+                  {touched && errors.pkgName ? <p className="field-error">{errors.pkgName}</p> : null}
+                </div>
+                <div>
+                  <label className="label" htmlFor="p-pkg-total">Toplam Seans</label>
+                  <input id="p-pkg-total" type="number" min={1} step={1} className="input" value={values.pkgTotal} onChange={setField("pkgTotal")} />
+                </div>
+                <div>
+                  <label className="label" htmlFor="p-pkg-left">Kalan Seans</label>
+                  <input id="p-pkg-left" type="number" min={0} step={1} className="input" value={values.pkgLeft} onChange={setField("pkgLeft")} />
+                </div>
+                <div>
+                  <label className="label" htmlFor="p-pkg-end">Paket Bitiş *</label>
+                  <input id="p-pkg-end" type="date" className="input" value={values.pkgEnd} onChange={setField("pkgEnd")} />
+                </div>
+                {touched && (errors.pkgSessions || errors.pkgEnd) ? (
+                  <p className="field-error form-full">{errors.pkgSessions || errors.pkgEnd}</p>
+                ) : null}
+              </div>
             </div>
           </div>
           <div className="modal-actions">
@@ -1532,7 +1610,10 @@ const consentChipMeta = (status: ConsentStatus | null): { label: string; classNa
     return { label: "Onaylı", className: "privacy-chip-granted" };
   }
   if (status === "deletion_requested") {
-    return { label: "Silme talebi var", className: "privacy-chip-danger" };
+    return { label: "Silme talebi: Bekliyor", className: "privacy-chip-danger" };
+  }
+  if (status === "deleted") {
+    return { label: "Veriler silindi", className: "privacy-chip-deleted" };
   }
   if (status === "revoked") {
     return { label: "Geri çekildi", className: "privacy-chip-warn" };
@@ -1544,10 +1625,12 @@ type UpdatePatient = (patientId: number, patch: Partial<Omit<Patient, "id">>) =>
 
 const PatientDetailDrawer: React.FC<{
   patient: Patient | null;
+  patients: Patient[];
   onClose: () => void;
   onUpdatePatient: UpdatePatient;
   onMessage: (patientId: number) => void;
-}> = ({ patient, onClose, onUpdatePatient, onMessage }) => {
+  onReport: (patient: Patient) => void;
+}> = ({ patient, patients, onClose, onUpdatePatient, onMessage, onReport }) => {
   const [drawerTab, setDrawerTab] = React.useState<DrawerTab>("ozet");
   const [visible, setVisible] = React.useState(false);
 
@@ -1619,6 +1702,9 @@ const PatientDetailDrawer: React.FC<{
           <button type="button" className="btn btn-outline btn-small" onClick={() => onMessage(patient.id)}>
             <MessageSquare size={14} /> Danışana Mesaj
           </button>
+          <button type="button" className="btn btn-outline btn-small patient-report-open" onClick={() => onReport(patient)}>
+            <FileText size={14} /> Haftalık Rapor
+          </button>
           <span className={classNames("privacy-chip", consentMeta.className)} title="KVKK rıza durumu (mobil uygulama)">
             <ShieldCheck size={13} /> KVKK: {consentMeta.label}
           </span>
@@ -1645,7 +1731,7 @@ const PatientDetailDrawer: React.FC<{
             <PatientTimeline key={patient.id} patientId={patient.id} measurements={getInitialMeasurements(patient.id)} />
           ) : null}
           {drawerTab === "plan" ? (
-            <DrawerPlanTab key={patient.id} patient={patient} onUpdatePatient={onUpdatePatient} />
+            <DrawerPlanTab key={patient.id} patient={patient} patients={patients} onUpdatePatient={onUpdatePatient} />
           ) : null}
           {drawerTab === "olcum" ? <MeasurementsTab patient={patient} /> : null}
           {drawerTab === "bildirim" ? <DrawerNotificationsTab key={patient.id} patient={patient} /> : null}
@@ -1862,6 +1948,8 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
   const navigate = useNavigate();
   const openNutritionSettings = () => navigate("/settings?bolum=beslenme");
   const [savedMsg, setSavedMsg] = React.useState<string | null>(null);
+  const [copyOpen, setCopyOpen] = React.useState(false);
+  const [copyName, setCopyName] = React.useState("");
 
   // Danışan değişince kayıtlı planını ve son ölçümünü yükle. İlk açılışta çalışmaz:
   // kaydedilmemiş taslak (dp_plan_*) korunur.
@@ -2022,6 +2110,40 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
     writePatientEntry(PATIENT_PLANS_KEY, patient.id, plan);
     onUpdatePatient(patient.id, { plan: name, lastAction: `Plan kaydedildi · ${new Date().toLocaleDateString("tr-TR")}` });
     setSavedMsg(`"${name}" ${patient.name} için kaydedildi.`);
+  };
+
+  /** Seçili şablonu yeni bir adla kopyalar; kopya, şablon listesinde görünür ve danışana atanır. */
+  const openCopy = () => {
+    setCopyName(`${templateName.trim() || "Diyet Programı"} Kopya`);
+    setCopyOpen(true);
+    setSavedMsg(null);
+  };
+
+  const handleCopySave = () => {
+    const name = copyName.trim();
+    if (!name) {
+      setSavedMsg("Kopya için bir şablon adı girin.");
+      return;
+    }
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) {
+      setSavedMsg("Kopyalamak için bir danışan seçin.");
+      return;
+    }
+    const plan: SavedPatientPlan = {
+      templateName: name,
+      items,
+      macros,
+      notes: notes.trim(),
+      repeat,
+      targetCalories: targets.targetCalories,
+      savedAt: new Date().toISOString()
+    };
+    writePatientEntry(PATIENT_PLANS_KEY, patient.id, plan);
+    setTemplateName(name);
+    onUpdatePatient(patient.id, { plan: name, lastAction: `Plan şablonu kopyalandı · ${new Date().toLocaleDateString("tr-TR")}` });
+    setCopyOpen(false);
+    setSavedMsg(`"${name}" adıyla kopya oluşturuldu ve ${patient.name} için kaydedildi.`);
   };
 
   const setProfileField = (key: keyof BmrInput) => (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -2274,7 +2396,30 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
               <button className="btn btn-outline" onClick={handleSavePlan}>
                 <FileText size={15} /> Kaydet
               </button>
+              <button className="btn btn-outline plan-copy-btn" onClick={openCopy}>
+                <ClipboardList size={15} /> Kopyala
+              </button>
             </div>
+            {copyOpen ? (
+              <div className="plan-copy-row">
+                <label className="label" htmlFor="plan-copy-name">Kopya Şablon Adı</label>
+                <input
+                  id="plan-copy-name"
+                  className="input"
+                  value={copyName}
+                  onChange={(event) => setCopyName(event.target.value)}
+                  placeholder="örn. 2 Haftalık Fit Plan — Kopya"
+                />
+                <div className="card-actions">
+                  <button type="button" className="btn btn-primary btn-small plan-copy-save" onClick={handleCopySave}>
+                    Kopyayı Kaydet
+                  </button>
+                  <button type="button" className="btn btn-outline btn-small" onClick={() => setCopyOpen(false)}>
+                    Vazgeç
+                  </button>
+                </div>
+              </div>
+            ) : null}
             {savedMsg ? (
               <p className="muted" role="status">
                 {savedMsg}
@@ -2925,6 +3070,13 @@ const AppointmentsView: React.FC<{
     setApptToDelete(appt);
   };
 
+  /** Linkten gelen "Bekliyor" talebini onaylar (Onaylı'ya çevirir). */
+  const approveAppointment = (appt: Appointment) => {
+    setAppointments((prev) =>
+      prev.map((item) => (item.id === appt.id ? { ...item, status: "Onaylı" as AppointmentStatus } : item))
+    );
+  };
+
   const confirmDelete = () => {
     if (!apptToDelete) {
       return;
@@ -2976,6 +3128,14 @@ const AppointmentsView: React.FC<{
                   </td>
                   <td style={{ textAlign: "right" }}>
                     <div className="row-actions">
+                      {appt.status === "Bekliyor" ? (
+                        <button
+                          className="btn btn-primary btn-small appt-approve"
+                          onClick={() => approveAppointment(appt)}
+                        >
+                          Onayla
+                        </button>
+                      ) : null}
                       <button className="btn btn-outline btn-small" onClick={() => setSummaryAppt(appt)}>
                         Özet
                       </button>
@@ -3040,6 +3200,20 @@ const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
   const previous = measurements.length > 1 ? measurements[measurements.length - 2] : undefined;
   const bmi = latest ? calculateBMI(latest.weightKg, latest.heightCm) : 0;
 
+  const requestLink = buildAppointmentRequestUrl(patient.id);
+  const [copied, setCopied] = React.useState(false);
+
+  const copyRequestLink = async () => {
+    try {
+      await navigator.clipboard.writeText(requestLink);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2500);
+    } catch {
+      // Pano erişimi yoksa kullanıcı linki elle kopyalayabilir.
+      setCopied(false);
+    }
+  };
+
   return (
     <div className="drawer-stack">
       <div className="card patient-hero">
@@ -3090,14 +3264,205 @@ const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
         <h3><ClipboardList size={15} /> Son İşlem</h3>
         <p className="muted">{patient.lastAction} · {measurements.length} ölçüm kaydı</p>
       </div>
+      <div className="card patient-link-card">
+        <h3><CalendarDays size={15} /> Randevu Talebi Bağlantısı</h3>
+        <p className="muted">
+          Bu bağlantıyı {patient.name} ile paylaşın; kendi randevu talebini oluştursun. Talepler Randevular
+          sayfasına <span className="badge badge-amber">Bekliyor</span> olarak düşer.
+        </p>
+        <div className="patient-link-row">
+          <code className="patient-link-code" title={requestLink}>{requestLink}</code>
+          <button type="button" className="btn btn-outline btn-small patient-link-copy" onClick={copyRequestLink}>
+            {copied ? "Kopyalandı ✓" : "Bağlantıyı Kopyala"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 };
 
 const BASE_PLAN_TEMPLATES = ["2 Haftalık Fit Plan", "Düşük Karbonhidrat", "Glütensiz 14G"];
 
-const DrawerPlanTab: React.FC<{ patient: Patient; onUpdatePatient: UpdatePatient }> = ({
+interface BulkAssignment {
+  patientId: number;
+  targetCalories: number;
+  macros: MacroSplit;
+}
+
+interface BulkRow {
+  kcal: string;
+  carbs: string;
+  protein: string;
+  fat: string;
+}
+
+const DEFAULT_BULK_MACROS: MacroSplit = { carbsPct: 45, proteinPct: 25, fatPct: 30 };
+
+/** "Toplu Ata": seçilen danışanlar için kalori/makro hedefi ayrı ayrı düzenlenir. */
+const BulkAssignModal: React.FC<{
+  patients: Patient[];
+  initialPatientId: number;
+  templateName: string;
+  onClose: () => void;
+  onConfirm: (assignments: BulkAssignment[]) => void;
+}> = ({ patients, initialPatientId, templateName, onClose, onConfirm }) => {
+  const dialogRef = useModalDismiss(onClose);
+  const [selected, setSelected] = React.useState<Record<number, boolean>>(() => ({ [initialPatientId]: true }));
+  const [rows, setRows] = React.useState<Record<number, BulkRow>>({});
+  const [error, setError] = React.useState("");
+
+  const rowFor = (patientId: number): BulkRow =>
+    rows[patientId] ?? {
+      kcal: "1800",
+      carbs: String(DEFAULT_BULK_MACROS.carbsPct),
+      protein: String(DEFAULT_BULK_MACROS.proteinPct),
+      fat: String(DEFAULT_BULK_MACROS.fatPct)
+    };
+
+  const setRow = (patientId: number, patch: Partial<BulkRow>) => {
+    setRows((prev) => ({ ...prev, [patientId]: { ...rowFor(patientId), ...patch } }));
+  };
+
+  const toggle = (patientId: number) => {
+    const nextChecked = !selected[patientId];
+    setSelected((prev) => ({ ...prev, [patientId]: nextChecked }));
+    if (nextChecked && !rows[patientId]) {
+      setRows((current) => ({ ...current, [patientId]: rowFor(patientId) }));
+    }
+  };
+
+  const confirm = () => {
+    const chosen = patients.filter((patient) => selected[patient.id]);
+    if (chosen.length === 0) {
+      setError("En az bir danışan seçin.");
+      return;
+    }
+    const assignments: BulkAssignment[] = [];
+    for (const patient of chosen) {
+      const row = rowFor(patient.id);
+      const kcal = Number(row.kcal);
+      const carbs = Number(row.carbs);
+      const protein = Number(row.protein);
+      const fat = Number(row.fat);
+      if (!Number.isFinite(kcal) || kcal < 800 || kcal > 5000) {
+        setError(`${patient.name}: kalori 800–5000 arasında olmalı.`);
+        return;
+      }
+      if (
+        !Number.isFinite(carbs) ||
+        !Number.isFinite(protein) ||
+        !Number.isFinite(fat) ||
+        [carbs, protein, fat].some((value) => value < 0 || value > 100) ||
+        carbs + protein + fat !== 100
+      ) {
+        setError(`${patient.name}: makro yüzdeleri toplamı 100 olmalı.`);
+        return;
+      }
+      assignments.push({ patientId: patient.id, targetCalories: Math.round(kcal), macros: { carbsPct: carbs, proteinPct: protein, fatPct: fat } });
+    }
+    onConfirm(assignments);
+  };
+
+  return (
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="bulk-title" onClick={onClose}>
+      <div className="modal bulk-modal" ref={dialogRef} onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h3 className="modal-title" id="bulk-title">Toplu Plan Ata</h3>
+            <p className="muted">
+              “{templateName}” şablonu seçilen danışanlara atanır. Her danışan için kalori ve makro hedefini
+              ayrı düzenleyin.
+            </p>
+          </div>
+          <button className="btn btn-outline btn-small" onClick={onClose}>Kapat</button>
+        </div>
+        <div className="bulk-list">
+          {patients.map((patient) => {
+            const checked = Boolean(selected[patient.id]);
+            const row = rowFor(patient.id);
+            return (
+              <div key={patient.id} className={classNames("bulk-row", checked && "bulk-row-active")}>
+                <label className="bulk-check">
+                  <input
+                    type="checkbox"
+                    id={`bulk-p-${patient.id}`}
+                    checked={checked}
+                    onChange={() => toggle(patient.id)}
+                  />
+                  <strong>{patient.name}</strong>
+                  <span className="muted">{patient.plan}</span>
+                </label>
+                {checked ? (
+                  <div className="bulk-inputs">
+                    <label className="bulk-field">
+                      <span className="muted">Kalori</span>
+                      <input
+                        type="number"
+                        min={800}
+                        max={5000}
+                        id={`bulk-kcal-${patient.id}`}
+                        className="input"
+                        value={row.kcal}
+                        onChange={(event) => setRow(patient.id, { kcal: event.target.value })}
+                      />
+                    </label>
+                    <label className="bulk-field">
+                      <span className="muted">Karb %</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        id={`bulk-carbs-${patient.id}`}
+                        className="input"
+                        value={row.carbs}
+                        onChange={(event) => setRow(patient.id, { carbs: event.target.value })}
+                      />
+                    </label>
+                    <label className="bulk-field">
+                      <span className="muted">Protein %</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        id={`bulk-protein-${patient.id}`}
+                        className="input"
+                        value={row.protein}
+                        onChange={(event) => setRow(patient.id, { protein: event.target.value })}
+                      />
+                    </label>
+                    <label className="bulk-field">
+                      <span className="muted">Yağ %</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        id={`bulk-fat-${patient.id}`}
+                        className="input"
+                        value={row.fat}
+                        onChange={(event) => setRow(patient.id, { fat: event.target.value })}
+                      />
+                    </label>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+        {error ? <p className="field-error">{error}</p> : null}
+        <div className="modal-actions">
+          <button type="button" className="btn btn-outline" onClick={onClose}>Vazgeç</button>
+          <button type="button" className="btn btn-primary plan-bulk-confirm" onClick={confirm}>
+            Seçilenlere Ata
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const DrawerPlanTab: React.FC<{ patient: Patient; patients: Patient[]; onUpdatePatient: UpdatePatient }> = ({
   patient,
+  patients,
   onUpdatePatient
 }) => {
   const [grid, setGrid] = React.useState<MealGridState>(() => readMealGrid(patient.id));
@@ -3117,6 +3482,7 @@ const DrawerPlanTab: React.FC<{ patient: Patient; onUpdatePatient: UpdatePatient
     String(Math.max(1, daysBetweenIso(patient.startDate, patient.endDate)) || PLAN_DAYS)
   );
   const [assignMsg, setAssignMsg] = React.useState<{ ok: boolean; text: string } | null>(null);
+  const [bulkOpen, setBulkOpen] = React.useState(false);
 
   const handleToggle = (day: number, meal: number) => {
     const next = grid.map((row, d) => (d === day ? row.map((done, m) => (m === meal ? !done : done)) : row));
@@ -3150,6 +3516,40 @@ const DrawerPlanTab: React.FC<{ patient: Patient; onUpdatePatient: UpdatePatient
     const endDate = addDaysIso(startDate, cycle);
     onUpdatePatient(patient.id, { plan: planName, startDate, endDate, lastAction: "Plan atandı" });
     setAssignMsg({ ok: true, text: `${planName} atandı: ${startDate} → ${endDate}` });
+  };
+
+  /** Şablon içeriği: kayıtlı bir plan varsa ondan, yoksa varsayılan öğelerden alınır. */
+  const templatePlan = React.useMemo(
+    () =>
+      Object.values(readPatientRecord<SavedPatientPlan>(PATIENT_PLANS_KEY)).find(
+        (plan) => plan.templateName === planName
+      ) ?? null,
+    [planName]
+  );
+
+  const applyBulkAssign = (assignments: BulkAssignment[]) => {
+    const baseItems = templatePlan && Array.isArray(templatePlan.items) ? templatePlan.items : DEFAULT_PLAN_ITEMS;
+    const savedAt = new Date().toISOString();
+    for (const assignment of assignments) {
+      writePatientEntry<SavedPatientPlan>(PATIENT_PLANS_KEY, assignment.patientId, {
+        templateName: planName,
+        items: baseItems,
+        macros: assignment.macros,
+        notes: templatePlan?.notes ?? "",
+        repeat: templatePlan?.repeat ?? { every: 14, unit: "day" },
+        targetCalories: assignment.targetCalories,
+        savedAt
+      });
+      onUpdatePatient(assignment.patientId, {
+        plan: planName,
+        lastAction: `Toplu plan atandı (${assignment.targetCalories} kcal)`
+      });
+    }
+    setBulkOpen(false);
+    setAssignMsg({
+      ok: true,
+      text: `"${planName}" ${assignments.length} danışana atandı.`
+    });
   };
 
   // Son 7 gün: plan başlangıcından bugüne kadar geçen günlerin son yedisi.
@@ -3191,6 +3591,9 @@ const DrawerPlanTab: React.FC<{ patient: Patient; onUpdatePatient: UpdatePatient
           </div>
           <div className="drawer-plan-action">
             <button type="button" className="btn btn-primary" onClick={handleAssign}>Ata / Güncelle</button>
+            <button type="button" className="btn btn-outline plan-bulk-open" onClick={() => setBulkOpen(true)}>
+              Toplu Ata
+            </button>
           </div>
         </div>
         {assignMsg ? (
@@ -3199,6 +3602,15 @@ const DrawerPlanTab: React.FC<{ patient: Patient; onUpdatePatient: UpdatePatient
           </p>
         ) : null}
       </div>
+      {bulkOpen ? (
+        <BulkAssignModal
+          patients={patients}
+          initialPatientId={patient.id}
+          templateName={planName}
+          onClose={() => setBulkOpen(false)}
+          onConfirm={applyBulkAssign}
+        />
+      ) : null}
       <div className="card">
         <h3>Öğün Günlüğü (Son 7 Gün)</h3>
         {weekDays.length === 0 ? (
@@ -3366,24 +3778,42 @@ const DrawerNotificationsTab: React.FC<{ patient: Patient }> = ({ patient }) => 
 const PatientPrivacyTab: React.FC<{ patient: Patient }> = ({ patient }) => {
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [processedAt, setProcessedAt] = React.useState<number | null>(null);
+  const [version, setVersion] = React.useState(0);
 
-  const events = readMobileEvents();
+  const events = React.useMemo(() => readMobileEvents(), [version]);
   const patientEvents = events.filter((event) => event.patientId === patient.id);
   const consentEvent = latestConsentFor(events, patient.id);
   const status = consentStatusOf(events, patient.id);
   const scope = consentEvent ? (consentEvent.payload as ConsentPayload).scope : undefined;
   const meta = consentChipMeta(status);
 
+  /** Danışan adına silme talebi kaydı oluşturur; veriler onaya kadar korunur. */
+  const createDeletionRequest = () => {
+    ingestMobileEvent({
+      patientId: patient.id,
+      type: "consent",
+      timestamp: new Date().toISOString(),
+      payload: {
+        status: "deletion_requested",
+        scope: "Panel üzerinden oluşturuldu — veri silme talebi onay bekliyor"
+      }
+    });
+    setProcessedAt(null);
+    setVersion((current) => current + 1);
+  };
+
+  /** Diyetisyen onayı sonrası veriler silinir ve "deleted" kaydı düşülür. */
   const processDeletion = () => {
     removePatientMobileEvents(patient.id);
     ingestMobileEvent({
       patientId: patient.id,
       type: "consent",
       timestamp: new Date().toISOString(),
-      payload: { status: "revoked", scope: "Veri silme talebi işlendi — mobil veriler silindi" }
+      payload: { status: "deleted", scope: "Veri silme talebi diyetisyen onayıyla işlendi" }
     });
     setProcessedAt(Date.now());
     setConfirmOpen(false);
+    setVersion((current) => current + 1);
   };
 
   return (
@@ -3417,7 +3847,12 @@ const PatientPrivacyTab: React.FC<{ patient: Patient }> = ({ patient }) => {
         ) : null}
         {processedAt ? (
           <p className="import-ok" role="status">
-            Talep işlendi: danışanın mobil verileri silindi ve rıza geri çekildi olarak kaydedildi.
+            Talep onaylandı: danışanın mobil verileri silindi ve akışa “verileri KVKK talebiyle silindi” kaydı düşüldü.
+          </p>
+        ) : null}
+        {status === "deleted" ? (
+          <p className="muted">
+            Danışanın tüm mobil verileri silindi. Yeni veri paylaşımı için yeniden KVKK onayı gerekir.
           </p>
         ) : null}
       </div>
@@ -3425,16 +3860,33 @@ const PatientPrivacyTab: React.FC<{ patient: Patient }> = ({ patient }) => {
       {status === "deletion_requested" ? (
         <div className="card">
           <h3>
-            <ShieldAlert size={15} /> Veri Silme Talebi
+            <ShieldAlert size={15} /> Veri Silme Talebi — Bekliyor
           </h3>
           <p className="muted">
-            {patient.name} tüm mobil verilerinin silinmesini talep etti
-            {consentEvent ? ` (${timeAgoTr(consentEvent.timestamp)})` : ""}. Talep işlendiğinde mobilden gelen
-            veriler silinir ve rıza geri çekilmiş sayılır.
+            {patient.name} için silme talebi kaydı oluşturuldu
+            {consentEvent ? ` (${timeAgoTr(consentEvent.timestamp)})` : ""}. Talep onaylanana kadar veriler korunur;
+            onayladığınızda mobil veriler silinir ve rıza durumu güncellenir.
           </p>
           <div className="card-actions">
             <button type="button" className="btn btn-danger btn-small" onClick={() => setConfirmOpen(true)}>
-              <Trash2 size={14} /> Talebi işle (verileri sil)
+              <Trash2 size={14} /> Onayla ve verileri sil
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {status !== "deletion_requested" && status !== "deleted" ? (
+        <div className="card">
+          <h3>
+            <ShieldAlert size={15} /> Veri Silme Talebi Oluştur
+          </h3>
+          <p className="muted">
+            Danışan sözlü/yazılı silme talebinde bulunduysa burada kayıt açın. Veriler siz onaylayana kadar
+            silinmez; talep “Bekliyor” durumunda kalır.
+          </p>
+          <div className="card-actions">
+            <button type="button" className="btn btn-outline btn-small" onClick={createDeletionRequest}>
+              <ShieldAlert size={14} /> Silme talebi oluştur
             </button>
           </div>
         </div>
@@ -3442,18 +3894,19 @@ const PatientPrivacyTab: React.FC<{ patient: Patient }> = ({ patient }) => {
 
       {confirmOpen ? (
         <ConfirmDialog
-          title="Veri silme talebini işle"
+          title="Veri silme talebini onayla"
           message={
             <>
               <p>
                 <strong>{patient.name}</strong> için mobilden gelen tüm veri kayıtları silinsin mi?
               </p>
               <p className="muted">
-                Ölçüm ve plan gibi panel kayıtları etkilenmez. Bu işlem geri alınamaz.
+                Ölçüm ve plan gibi panel kayıtları etkilenmez. Bu işlem geri alınamaz ve aktivite akışına
+                “verileri KVKK talebiyle silindi” olarak işlenir.
               </p>
             </>
           }
-          confirmLabel="Verileri sil"
+          confirmLabel="Onayla ve sil"
           onConfirm={processDeletion}
           onClose={() => setConfirmOpen(false)}
         />
@@ -3655,6 +4108,7 @@ const App: React.FC = () => {
 
   const [composerOpen, setComposerOpen] = React.useState(false);
   const [composerPatientId, setComposerPatientId] = React.useState<number | null>(null);
+  const [reportPatient, setReportPatient] = React.useState<Patient | null>(null);
   const [priorityApptPatientId, setPriorityApptPatientId] = React.useState<number | null>(null);
   const [mobileEventsVersion, setMobileEventsVersion] = React.useState(0);
 
@@ -3678,7 +4132,8 @@ const App: React.FC = () => {
         plan: patient.plan,
         compliance: patient.compliance,
         status: patient.status,
-        endDate: patient.endDate
+        endDate: patient.endDate,
+        package: patient.package
       })),
     [patients]
   );
@@ -3818,6 +4273,22 @@ const App: React.FC = () => {
         usedIds.add(id);
 
         const startDate = isDate(row.startDate) ? (row.startDate as string) : today;
+        const pkgRaw =
+          typeof row.package === "object" && row.package !== null
+            ? (row.package as Record<string, unknown>)
+            : null;
+        const importedPackage: PatientPackage | undefined =
+          pkgRaw && typeof pkgRaw.name === "string" && pkgRaw.name.trim() && isDate(pkgRaw.endDate)
+            ? {
+                name: pkgRaw.name.trim().slice(0, MAX_TEXT),
+                sessionsTotal: Math.max(1, Math.round(num(pkgRaw.sessionsTotal, 1))),
+                sessionsLeft: Math.max(0, Math.round(num(pkgRaw.sessionsLeft, 0))),
+                endDate: pkgRaw.endDate as string
+              }
+            : undefined;
+        if (importedPackage && importedPackage.sessionsLeft > importedPackage.sessionsTotal) {
+          importedPackage.sessionsLeft = importedPackage.sessionsTotal;
+        }
         nextPatients.push({
           id,
           name: row.name.trim().slice(0, MAX_TEXT),
@@ -3826,7 +4297,8 @@ const App: React.FC = () => {
           endDate: isDate(row.endDate) ? (row.endDate as string) : startDate,
           compliance: Math.max(0, Math.min(100, Math.round(num(row.compliance)))),
           lastAction: typeof row.lastAction === "string" && row.lastAction ? row.lastAction : "İçe aktarıldı",
-          status: row.status === "Risk" ? "Risk" : "Aktif"
+          status: row.status === "Risk" ? "Risk" : "Aktif",
+          package: importedPackage
         });
 
         if (Array.isArray(row.measurements)) {
@@ -3947,6 +4419,14 @@ const App: React.FC = () => {
   const legalSlug = legalSlugFromPath(routePath);
   if (legalSlug) {
     return <LegalView slug={legalSlug} homeHref="#/" />;
+  }
+
+  // Paylaşılan linkle danışanın kendi randevu talebini oluşturduğu herkese açık sayfa.
+  if (routePath === "/randevu-talep") {
+    const params = new URLSearchParams(location.search);
+    return (
+      <AppointmentRequestPage patientId={Number(params.get("d"))} token={params.get("k") ?? ""} />
+    );
   }
 
   if (routePath === "/tanitim" || (!isAuthed && routePath === "/")) {
@@ -4100,7 +4580,15 @@ const App: React.FC = () => {
                 </div>
               </div>
 
-              <ActivityFeed patients={patients} />
+              <ActivityFeed
+                patients={patients}
+                onOpenPatient={(patientId) => {
+                  const target = patients.find((patient) => patient.id === patientId);
+                  if (target) {
+                    openDetail(target);
+                  }
+                }}
+              />
 
               <div className="card">
                 <div className="card-head">
@@ -4220,9 +4708,19 @@ const App: React.FC = () => {
           <PatientDetailDrawer
             // Seçim anındaki kopya yerine güncel kaydı ver; çekmecedeki değişiklikler anında yansısın.
             patient={patients.find((patient) => patient.id === selectedPatient?.id) ?? null}
+            patients={patients}
             onClose={closeDetail}
             onUpdatePatient={handleUpdatePatient}
             onMessage={openComposer}
+            onReport={setReportPatient}
+          />
+        ) : null}
+
+        {reportPatient ? (
+          <WeeklyReport
+            patient={patients.find((patient) => patient.id === reportPatient.id) ?? reportPatient}
+            measurements={getInitialMeasurements(reportPatient.id)}
+            onClose={() => setReportPatient(null)}
           />
         ) : null}
 

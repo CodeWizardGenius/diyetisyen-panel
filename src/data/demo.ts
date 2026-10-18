@@ -6,6 +6,15 @@
 
 export type PatientStatus = "Aktif" | "Risk";
 
+/** Danışanın satın aldığı takip paketi (kalan gün, paket bitişinden hesaplanır). */
+export type PatientPackage = {
+  name: string;
+  sessionsTotal: number;
+  sessionsLeft: number;
+  /** Paketin geçerlilik bitiş tarihi (YYYY-MM-DD). */
+  endDate: string;
+};
+
 export type Patient = {
   id: number;
   name: string;
@@ -15,6 +24,8 @@ export type Patient = {
   compliance: number;
   lastAction: string;
   status: PatientStatus;
+  /** Opsiyonel paket bilgisi; tanımlıysa paket bitişi uyarıları üretilir. */
+  package?: PatientPackage;
 };
 
 export const DEMO_PATIENTS: Patient[] = [

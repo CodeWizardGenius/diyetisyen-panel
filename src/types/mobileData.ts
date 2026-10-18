@@ -105,14 +105,15 @@ export interface AchievementPayload {
   streakDays?: number;
 }
 
-export type ConsentStatus = "granted" | "revoked" | "deletion_requested";
+export type ConsentStatus = "granted" | "revoked" | "deletion_requested" | "deleted";
 
-export const CONSENT_STATUSES: ConsentStatus[] = ["granted", "revoked", "deletion_requested"];
+export const CONSENT_STATUSES: ConsentStatus[] = ["granted", "revoked", "deletion_requested", "deleted"];
 
 export const CONSENT_STATUS_LABELS: Record<ConsentStatus, string> = {
   granted: "Onay verildi",
   revoked: "Onay geri çekildi",
-  deletion_requested: "Veri silme talebi"
+  deletion_requested: "Veri silme talebi (bekliyor)",
+  deleted: "Mobil veriler silindi"
 };
 
 export interface ConsentPayload {
@@ -473,6 +474,7 @@ export const describeMobileEvent = (event: MobileEvent): string => {
       if (payload.status === "granted") return "KVKK kapsamında veri paylaşımına onay verdi.";
       if (payload.status === "revoked") return "KVKK rızasını geri çekti.";
       if (payload.status === "deletion_requested") return "verilerinin silinmesini talep etti.";
+      if (payload.status === "deleted") return "verileri KVKK talebiyle silindi.";
       return "KVKK rızası güncellendi.";
     }
     default:
@@ -512,7 +514,7 @@ export const MOBILE_EVENT_EXAMPLES: Record<MobileEventType, { payload: Record<st
   },
   consent: {
     payload: { status: "granted", scope: "Mobil veri paylaşımı ve panele aktarım" },
-    rule: "durum zorunlu: granted | revoked | deletion_requested; kapsam metni opsiyonel."
+    rule: "durum zorunlu: granted | revoked | deletion_requested | deleted; kapsam metni opsiyonel."
   }
 };
 

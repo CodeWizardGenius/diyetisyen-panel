@@ -1,4 +1,5 @@
 import type { MeasurementLike } from "../../types/settings";
+import type { PatientPackage } from "../../data/demo";
 import type { AlertRules, PatientAlert } from "../../types/alerts";
 import {
   eventTime,
@@ -17,6 +18,8 @@ export interface EnginePatient {
   compliance: number;
   status: string;
   endDate: string;
+  /** Paket takibi: tanımlıysa paket bitişi/ödeme uyarısı üretilir. */
+  package?: PatientPackage;
 }
 
 type GetMeasurements = (patientId: number) => MeasurementLike[];
@@ -364,6 +367,62 @@ const derivePlanExpirationAlerts = (
   return alerts;
 };
 
+/**
+ * Paket bitişi / ödeme hatırlatma uyarıları. Paket tanımlı danışanlarda:
+ * süresi geçmiş → kritik (ödeme/yenileme gecikti), bugün/yarın → uyarı,
+ * `packageExpiryNoticeDays` penceresindeki diğer günler → bilgi.
+ */
+const derivePackageAlerts = (
+  patients: EnginePatient[],
+  rules: AlertRules,
+  now: number
+): PatientAlert[] => {
+  const alerts: PatientAlert[] = [];
+  for (const patient of patients) {
+    if (!patient.package) {
+      continue;
+    }
+    const left = daysUntil(patient.package.endDate, now);
+    if (left === null) {
+      continue;
+    }
+    const remainingText = left === 0 ? "bugün" : left === 1 ? "yarın" : `${left} gün sonra`;
+    const sessionsText = `${patient.package.sessionsLeft}/${patient.package.sessionsTotal} seans kaldı`;
+
+    if (left < 0) {
+      alerts.push({
+        id: `pkg-${patient.id}`,
+        patientId: patient.id,
+        patientName: patient.name,
+        patientPlan: patient.plan,
+        severity: "critical",
+        category: "package_expiration",
+        title: "Paket süresi doldu",
+        description: `${patient.package.name} paketi ${patient.package.endDate} tarihinde sona erdi (${sessionsText}) — ödeme/yenileme hatırlatması gönderilmeli.`,
+        timestamp: minutesAgoIso(now, 60 + patient.id * 11),
+        isResolved: false
+      });
+      continue;
+    }
+
+    if (left <= rules.packageExpiryNoticeDays) {
+      alerts.push({
+        id: `pkg-${patient.id}`,
+        patientId: patient.id,
+        patientName: patient.name,
+        patientPlan: patient.plan,
+        severity: left <= 1 ? "warning" : "info",
+        category: "package_expiration",
+        title: "Paket bitişi yaklaşıyor",
+        description: `${patient.package.name} paketi ${remainingText} (${patient.package.endDate}) sona eriyor (${sessionsText}) — ödeme/yenileme hatırlatması gönderilebilir.`,
+        timestamp: minutesAgoIso(now, 180 + patient.id * 13),
+        isResolved: false
+      });
+    }
+  }
+  return alerts;
+};
+
 export const buildAlerts = (
   patients: EnginePatient[],
   getMeasurements: GetMeasurements,
@@ -377,6 +436,7 @@ export const buildAlerts = (
     ...derivePlateauAlerts(patients, getMeasurements, rules, now),
     ...deriveMissedMealAlerts(patients, rules, now),
     ...derivePlanExpirationAlerts(patients, rules, now),
+    ...derivePackageAlerts(patients, rules, now),
     ...deriveInactivityAlerts(patients, getMobileEvents, rules, now),
     ...deriveWeightGainAlerts(patients, getMobileEvents, rules, now),
     ...deriveWaterTargetAlerts(patients, getMobileEvents, rules, now)

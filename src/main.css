@@ -1352,8 +1352,11 @@ td { padding: 13px 8px 13px 0; border-bottom: 1px solid var(--slate-100); }
 .feed-sim-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .feed-sim-row .input { flex: 1 1 180px; min-width: 0; }
 .feed-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; }
-.feed-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 4px; border-top: 1px solid var(--slate-100); }
-.feed-item:first-child { border-top: 0; }
+.feed-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 4px; border: 0; border-top: 1px solid var(--slate-100); background: none; font: inherit; color: inherit; width: 100%; text-align: left; }
+.feed-list li:first-child .feed-item { border-top: 0; }
+.feed-item-clickable { cursor: pointer; }
+.feed-item-clickable:hover .feed-text strong { text-decoration: underline; }
+.feed-item-clickable:focus-visible { outline: 2px solid var(--emerald); outline-offset: -2px; border-radius: 10px; }
 .feed-item-unread { background: rgba(16, 185, 129, 0.06); border-radius: 10px; }
 .feed-icon {
   width: 30px;
@@ -1761,6 +1764,123 @@ td { padding: 13px 8px 13px 0; border-bottom: 1px solid var(--slate-100); }
 [data-theme="dark"] .privacy-chip-danger { background: rgba(244, 63, 94, 0.16); border-color: #7f1d1d; color: #fda4af; }
 [data-theme="dark"] .privacy-meta strong { color: #e2e8f0; }
 
+/* ---------- Paket takibi ---------- */
+.package-fieldset { border-top: 1px dashed var(--slate-200); padding-top: 12px; }
+.package-hint { margin: 2px 0 8px; font-size: 0.78rem; }
+.package-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.package-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  background: rgba(139, 92, 246, 0.12);
+  color: #6d28d9;
+  border: 1px solid rgba(139, 92, 246, 0.28);
+}
+.package-line-text { font-size: 0.78rem; }
+
+.privacy-chip-deleted { background: var(--slate-100); border-color: var(--slate-200); color: var(--slate-500); }
+[data-theme="dark"] .package-badge { background: rgba(139, 92, 246, 0.18); border-color: rgba(139, 92, 246, 0.4); color: #c4b5fd; }
+[data-theme="dark"] .package-fieldset { border-top-color: #243349; }
+[data-theme="dark"] .privacy-chip-deleted { background: #1a2740; border-color: #2b3d5c; color: #94a3b8; }
+[data-theme="dark"] .patient-link-code { background: #0b1425; border-color: #243349; color: #cbd5e1; }
+
+/* ---------- Haftalık rapor ---------- */
+.report-modal { max-width: 760px; }
+.report-brand { flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.report-brand-main { display: flex; align-items: center; gap: 10px; }
+.report-brand-text { display: flex; flex-direction: column; }
+.report-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--emerald), var(--emerald-dark));
+  color: #ffffff;
+  flex: 0 0 auto;
+}
+.report-week { font-size: 0.8rem; color: var(--slate-500); font-weight: 600; }
+.report-breakdown h4 { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 0.9rem; }
+.report-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.report-table th,
+.report-table td { border: 1px solid var(--slate-200); padding: 6px 8px; text-align: left; }
+.report-table th { background: var(--slate-100); font-weight: 600; color: var(--slate-700); }
+.report-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--slate-200);
+  padding-top: 12px;
+}
+.report-approve { display: inline-flex; align-items: flex-start; gap: 8px; font-size: 0.86rem; color: var(--slate-700); }
+.report-approve input { margin-top: 2px; }
+.report-actions-right { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.report-sent { display: inline-flex; align-items: center; gap: 6px; color: var(--emerald-dark); font-size: 0.84rem; font-weight: 600; }
+.btn-disabled { opacity: 0.55; cursor: not-allowed; }
+[data-theme="dark"] .report-table th,
+[data-theme="dark"] .report-table td { border-color: #243349; }
+[data-theme="dark"] .report-table th { background: #16233a; color: #cbd5e1; }
+[data-theme="dark"] .report-actions { border-top-color: #243349; }
+[data-theme="dark"] .report-approve { color: #cbd5e1; }
+[data-theme="dark"] .report-sent { color: var(--mint); }
+[data-theme="dark"] .report-week { color: #94a3b8; }
+
+/* ---------- Randevu talebi bağlantısı & herkese açık sayfa ---------- */
+.patient-link-card h3 { display: inline-flex; align-items: center; gap: 6px; }
+.patient-link-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+.patient-link-code {
+  flex: 1 1 260px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--slate-100);
+  border: 1px solid var(--slate-200);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 0.74rem;
+  color: var(--slate-700);
+}
+.request-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  background: linear-gradient(180deg, #f8fbfa 0%, #eef6f3 100%);
+}
+.request-card { width: 100%; max-width: 560px; padding: 24px; }
+.request-brand { display: flex; align-items: center; gap: 10px; border-bottom: 2px solid var(--emerald); padding-bottom: 10px; margin-bottom: 16px; }
+.request-brand strong { display: block; color: var(--emerald-dark); font-size: 1.05rem; letter-spacing: 0.02em; }
+.request-brand-sub { font-size: 0.78rem; }
+.request-title { margin: 0 0 6px; font-size: 1.2rem; }
+.request-success { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; color: var(--emerald-dark); }
+.request-success h1 { margin: 0; }
+.request-foot { display: inline-flex; align-items: center; gap: 6px; font-size: 0.74rem; margin-top: 18px; }
+[data-theme="dark"] .request-page { background: linear-gradient(180deg, #0d1524 0%, #101d31 100%); }
+[data-theme="dark"] .request-brand strong { color: var(--mint); }
+[data-theme="dark"] .request-success { color: var(--mint); }
+
+/* ---------- Plan kopyalama & toplu atama ---------- */
+.plan-copy-row { display: flex; flex-direction: column; gap: 6px; border: 1px dashed var(--slate-200); border-radius: 12px; padding: 10px 12px; }
+.plan-copy-row .card-actions { margin-top: 4px; }
+.bulk-modal { max-width: 720px; }
+.bulk-list { display: flex; flex-direction: column; gap: 8px; max-height: 380px; overflow-y: auto; padding-right: 4px; }
+.bulk-row { border: 1px solid var(--slate-200); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.bulk-row-active { border-color: var(--emerald); background: rgba(16, 185, 129, 0.04); }
+.bulk-check { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; cursor: pointer; }
+.bulk-inputs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.bulk-field { display: flex; flex-direction: column; gap: 3px; font-size: 0.76rem; }
+.bulk-field .input { padding: 6px 8px; }
+[data-theme="dark"] .plan-copy-row { border-color: #243349; }
+[data-theme="dark"] .bulk-row { border-color: #243349; }
+[data-theme="dark"] .bulk-row-active { border-color: var(--emerald); background: rgba(16, 185, 129, 0.08); }
+
 /* ---------- Mobil (360–768 px) taşma düzeltmeleri ---------- */
 @media (max-width: 768px) {
   .page-head { flex-wrap: wrap; }
@@ -1775,6 +1895,10 @@ td { padding: 13px 8px 13px 0; border-bottom: 1px solid var(--slate-100); }
   .priority-actions { width: 100%; justify-content: flex-start; }
   .timeline-summary,
   .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bulk-inputs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .report-actions { flex-direction: column; align-items: stretch; }
+  .report-actions-right { justify-content: flex-start; }
+  .patient-link-code { flex-basis: 100%; }
 }
 
 @media (max-width: 420px) {

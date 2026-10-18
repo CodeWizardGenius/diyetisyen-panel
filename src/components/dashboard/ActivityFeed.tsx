@@ -48,6 +48,8 @@ interface PatientRef {
 
 interface Props {
   patients: PatientRef[];
+  /** Kayıt izlenebilirliği: tıklanan kaydın danışan detayını açar. */
+  onOpenPatient?: (patientId: number) => void;
 }
 
 type ScenarioKey = "aktif" | "hareketsiz" | "su" | "kilo" | "rozet" | "kvkk" | "silme";
@@ -134,7 +136,7 @@ const readLastReadAt = (): number => {
 };
 
 /** Dashboard'daki canlı veri akışı: son mobil veri girişleri + okunmamış sayacı. */
-export const ActivityFeed: React.FC<Props> = ({ patients }) => {
+export const ActivityFeed: React.FC<Props> = ({ patients, onOpenPatient }) => {
   const [events, setEvents] = React.useState<MobileEvent[]>(() => sortMobileEventsDesc(readMobileEvents()));
   const [lastReadAt, setLastReadAt] = React.useState<number>(() => readLastReadAt());
   const [scenario, setScenario] = React.useState<ScenarioKey>("aktif");
@@ -248,23 +250,37 @@ export const ActivityFeed: React.FC<Props> = ({ patients }) => {
         <ul className="feed-list">
           {visible.map((event) => {
             const isUnread = Date.parse(event.receivedAt) > lastReadAt;
+            const patientExists = patients.some((patient) => patient.id === event.patientId);
+            const clickable = Boolean(onOpenPatient) && patientExists;
             return (
-              <li key={event.id} className={isUnread ? "feed-item feed-item-unread" : "feed-item"}>
-                <span className={classNames("feed-icon", `feed-icon-${event.type}`)}>{EVENT_ICON[event.type]}</span>
-                <div className="feed-body">
-                  <p className="feed-text">
-                    <strong>{nameOf(event.patientId)}</strong> {describeMobileEvent(event)}
-                  </p>
-                  <small className="muted feed-meta">
-                    {MOBILE_EVENT_LABELS[event.type]} · {timeAgoTr(event.timestamp)}
-                    {event.status === "eksik" ? (
-                      <span className="feed-flag" title={event.issues.join(" ")}>
-                        <AlertTriangle size={12} /> eksik veri
-                      </span>
-                    ) : null}
-                  </small>
-                </div>
-                {isUnread ? <span className="feed-dot" aria-hidden="true" /> : null}
+              <li key={event.id}>
+                <button
+                  type="button"
+                  className={classNames(
+                    "feed-item",
+                    isUnread && "feed-item-unread",
+                    clickable && "feed-item-clickable"
+                  )}
+                  onClick={clickable ? () => onOpenPatient?.(event.patientId) : undefined}
+                  disabled={!clickable}
+                  title={clickable ? `${nameOf(event.patientId)} detayını aç` : undefined}
+                >
+                  <span className={classNames("feed-icon", `feed-icon-${event.type}`)}>{EVENT_ICON[event.type]}</span>
+                  <div className="feed-body">
+                    <p className="feed-text">
+                      <strong>{nameOf(event.patientId)}</strong> {describeMobileEvent(event)}
+                    </p>
+                    <small className="muted feed-meta">
+                      {MOBILE_EVENT_LABELS[event.type]} · {timeAgoTr(event.timestamp)}
+                      {event.status === "eksik" ? (
+                        <span className="feed-flag" title={event.issues.join(" ")}>
+                          <AlertTriangle size={12} /> eksik veri
+                        </span>
+                      ) : null}
+                    </small>
+                  </div>
+                  {isUnread ? <span className="feed-dot" aria-hidden="true" /> : null}
+                </button>
               </li>
             );
           })}
