@@ -5,7 +5,11 @@ import { HashRouter } from "react-router-dom";
 import App from "./App";
 import { ThemeProvider } from "./context/ThemeContext";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { seedMobileDataIfEmpty } from "./types/mobileData";
 import "./main.css";
+
+// Demo amaçlı: mobil veri akışı boşsa örnek veri tohumla (yalnızca ilk yüklemede etkilidir).
+seedMobileDataIfEmpty();
 
 // GitHub Pages statik bir host; HTML5 BrowserRouter ile alt rotada (ör. /settings)
 // yapılan hard refresh, sunucuda o yolda fiziksel dosya aranmasına ve 404'e yol açar.

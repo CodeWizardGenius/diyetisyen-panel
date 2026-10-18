@@ -22,6 +22,7 @@ import {
   Menu,
   X,
   LogOut,
+  MessageSquare,
 
   Clock,
   CheckCircle2,
@@ -47,13 +48,33 @@ import {
   Trash2,
   GripVertical,
   Calculator,
-  FileText
+  FileText,
+  ShieldCheck,
+  ShieldAlert
 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { SettingsView } from "./components/settings/SettingsView";
 import { AlertsView } from "./components/alerts/AlertsView";
 import { LandingPage } from "./components/landing/LandingPage";
 import { LegalView, legalSlugFromPath } from "./components/landing/LegalPages";
+import { ActivityFeed } from "./components/dashboard/ActivityFeed";
+import { PriorityList } from "./components/dashboard/PriorityList";
+import { buildPriorityList } from "./components/dashboard/priority";
+import { PatientTimeline } from "./components/patient/PatientTimeline";
+import { AppointmentSummary } from "./components/appointments/AppointmentSummary";
+import { MessageComposer } from "./components/messaging/MessageComposer";
+import {
+  clearMobileEvents,
+  consentStatusOf,
+  ingestMobileEvent,
+  latestConsentFor,
+  MOBILE_EVENTS_CHANGED,
+  readMobileEvents,
+  removePatientMobileEvents,
+  type ConsentPayload,
+  type ConsentStatus,
+  type MobileEvent
+} from "./types/mobileData";
 import { DEMO_PATIENTS, type Patient, type PatientStatus } from "./data/demo";
 import { buildAlerts, isQuietNow, timeAgoTr } from "./components/alerts/alertEngine";
 import {
@@ -63,6 +84,7 @@ import {
   MACRO_PRESETS,
   SETTINGS_STORAGE_KEY,
   type BmrFormula,
+  type MeasurementLike,
   type ProfileSettings,
   type ScheduleSettings,
   type SettingsSectionKey
@@ -282,6 +304,7 @@ const removePatientLocalData = (patientId: number): void => {
       writePatientEntry(key, patientId, undefined);
     }
   });
+  removePatientMobileEvents(patientId);
   try {
     localStorage.removeItem(mealGridKey(patientId));
   } catch {
@@ -290,8 +313,9 @@ const removePatientLocalData = (patientId: number): void => {
 };
 
 /**
- * Yedek geri yüklenirken eski danışanların plan, not, hatırlatma ve öğün çizelgesi kayıtlarını siler;
- * aynı kimlik numarasını alan yeni danışanlara karışmasınlar. Ölçümler içe aktarmada ayrıca yazılır.
+ * Yedek geri yüklenirken eski danışanların plan, not, hatırlatma, öğün çizelgesi ve mobil veri
+ * akışı kayıtlarını siler; aynı kimlik numarasını alan yeni danışanlara karışmasınlar.
+ * Ölçümler içe aktarmada ayrıca yazılır.
  */
 const clearPatientScopedStorage = (): void => {
   try {
@@ -304,6 +328,7 @@ const clearPatientScopedStorage = (): void => {
       }
     }
     gridKeys.forEach((key) => localStorage.removeItem(key));
+    clearMobileEvents();
   } catch {
     // depolama kullanılamıyor — yoksay
   }
@@ -1490,14 +1515,30 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
   );
 };
 
-type DrawerTab = "ozet" | "plan" | "olcum" | "bildirim";
+type DrawerTab = "ozet" | "zaman" | "plan" | "olcum" | "bildirim" | "kvkk";
 
 const DRAWER_TABS: Array<{ key: DrawerTab; label: string; icon: React.ReactNode }> = [
   { key: "ozet", label: "Özet", icon: <ClipboardList size={15} /> },
+  { key: "zaman", label: "Zaman Çizelgesi", icon: <CalendarDays size={15} /> },
   { key: "plan", label: "14 Günlük Plan", icon: <UtensilsCrossed size={15} /> },
   { key: "olcum", label: "Ölçüm & Değerler", icon: <Scale size={15} /> },
-  { key: "bildirim", label: "Bildirimler & Notlar", icon: <Bell size={15} /> }
+  { key: "bildirim", label: "Bildirimler & Notlar", icon: <Bell size={15} /> },
+  { key: "kvkk", label: "Gizlilik & Veri", icon: <ShieldCheck size={15} /> }
 ];
+
+/** KVKK rıza durumunu kısa etiket + renk sınıfına çevirir. */
+const consentChipMeta = (status: ConsentStatus | null): { label: string; className: string } => {
+  if (status === "granted") {
+    return { label: "Onaylı", className: "privacy-chip-granted" };
+  }
+  if (status === "deletion_requested") {
+    return { label: "Silme talebi var", className: "privacy-chip-danger" };
+  }
+  if (status === "revoked") {
+    return { label: "Geri çekildi", className: "privacy-chip-warn" };
+  }
+  return { label: "Onay yok", className: "privacy-chip-warn" };
+};
 
 type UpdatePatient = (patientId: number, patch: Partial<Omit<Patient, "id">>) => void;
 
@@ -1505,7 +1546,8 @@ const PatientDetailDrawer: React.FC<{
   patient: Patient | null;
   onClose: () => void;
   onUpdatePatient: UpdatePatient;
-}> = ({ patient, onClose, onUpdatePatient }) => {
+  onMessage: (patientId: number) => void;
+}> = ({ patient, onClose, onUpdatePatient, onMessage }) => {
   const [drawerTab, setDrawerTab] = React.useState<DrawerTab>("ozet");
   const [visible, setVisible] = React.useState(false);
 
@@ -1532,9 +1574,24 @@ const PatientDetailDrawer: React.FC<{
     return () => window.removeEventListener("keydown", handleKey);
   }, [onClose]);
 
+  const [dataVersion, setDataVersion] = React.useState(0);
+
+  React.useEffect(() => {
+    const onChange = () => setDataVersion((version) => version + 1);
+    window.addEventListener(MOBILE_EVENTS_CHANGED, onChange);
+    return () => window.removeEventListener(MOBILE_EVENTS_CHANGED, onChange);
+  }, []);
+
+  const consent = React.useMemo(
+    () => (patient ? consentStatusOf(readMobileEvents(), patient.id) : null),
+    [patient, dataVersion]
+  );
+
   if (!patient) {
     return null;
   }
+
+  const consentMeta = consentChipMeta(consent);
 
   return (
     <div className="drawer" role="dialog" aria-modal="true" onClick={onClose}>
@@ -1558,6 +1615,15 @@ const PatientDetailDrawer: React.FC<{
           </button>
         </div>
 
+        <div className="drawer-quick-actions">
+          <button type="button" className="btn btn-outline btn-small" onClick={() => onMessage(patient.id)}>
+            <MessageSquare size={14} /> Danışana Mesaj
+          </button>
+          <span className={classNames("privacy-chip", consentMeta.className)} title="KVKK rıza durumu (mobil uygulama)">
+            <ShieldCheck size={13} /> KVKK: {consentMeta.label}
+          </span>
+        </div>
+
         <div className="drawer-tabs" role="tablist" aria-label="Danışan detay sekmeleri">
           {DRAWER_TABS.map((item) => (
             <button
@@ -1575,11 +1641,15 @@ const PatientDetailDrawer: React.FC<{
 
         <div className="drawer-body">
           {drawerTab === "ozet" ? <DrawerSummary patient={patient} /> : null}
+          {drawerTab === "zaman" ? (
+            <PatientTimeline key={patient.id} patientId={patient.id} measurements={getInitialMeasurements(patient.id)} />
+          ) : null}
           {drawerTab === "plan" ? (
             <DrawerPlanTab key={patient.id} patient={patient} onUpdatePatient={onUpdatePatient} />
           ) : null}
           {drawerTab === "olcum" ? <MeasurementsTab patient={patient} /> : null}
           {drawerTab === "bildirim" ? <DrawerNotificationsTab key={patient.id} patient={patient} /> : null}
+          {drawerTab === "kvkk" ? <PatientPrivacyTab key={patient.id} patient={patient} /> : null}
         </div>
       </div>
     </div>
@@ -2335,6 +2405,19 @@ const isAppointmentOf = (appt: Appointment, patient: Pick<Patient, "id" | "name"
 
 const APPOINTMENTS_STORAGE_KEY = "dp_appointments";
 
+/** Panel içinden (örn. öncelik listesinden) yeni randevu ekler; Randevular sayfası açılışta okur. */
+const appendStoredAppointment = (draft: AppointmentDraft): void => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    const next: Appointment[] = [...readStoredAppointments(), { ...draft, id: `appt-${Date.now()}` }];
+    localStorage.setItem(APPOINTMENTS_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // depolama kullanılamıyor — yoksay
+  }
+};
+
 /** Dashboard özeti için randevuları salt-okunur okur; yoksa/bozuksa çekirdek veriye düşer. */
 const readStoredAppointments = (): Appointment[] => {
   if (typeof window === "undefined") {
@@ -2657,15 +2740,17 @@ const AppointmentFormModal: React.FC<{
   /** Çakışma kontrolü için mevcut randevular (düzenlenen kayıt hariç). */
   others: Appointment[];
   initial?: Appointment;
+  /** Yeni randevuda önceden seçili danışan (örn. öncelik listesinden "Randevu"). */
+  initialPatientId?: number;
   onClose: () => void;
   onSubmit: (draft: AppointmentDraft) => void;
-}> = ({ patients, others, initial, onClose, onSubmit }) => {
+}> = ({ patients, others, initial, initialPatientId, onClose, onSubmit }) => {
   const dialogRef = useModalDismiss(onClose);
   const schedule = React.useMemo(() => loadSettings().schedule, []);
   const [values, setValues] = React.useState<AppointmentDraft>(() => {
     const initialPatient = initial
       ? patients.find((patient) => (initial.patientId !== undefined ? patient.id === initial.patientId : patient.name === initial.patient))
-      : patients[0];
+      : patients.find((patient) => patient.id === initialPatientId) ?? patients[0];
     return {
       patientId: initialPatient?.id,
       patient: initialPatient?.name ?? "",
@@ -2770,11 +2855,18 @@ const AppointmentFormModal: React.FC<{
   );
 };
 
-const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ patients, query }) => {
+const AppointmentsView: React.FC<{
+  patients: Patient[];
+  query: string;
+  getMeasurements: (patientId: number) => MeasurementLike[];
+  getMobileEvents: (patientId: number) => MobileEvent[];
+  onMessage: (patientId: number) => void;
+}> = ({ patients, query, getMeasurements, getMobileEvents, onMessage }) => {
   const [appointments, setAppointments] = usePersistentState<Appointment[]>(APPOINTMENTS_STORAGE_KEY, SEED_APPOINTMENTS);
   const [modalOpen, setModalOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Appointment | null>(null);
   const [apptToDelete, setApptToDelete] = React.useState<Appointment | null>(null);
+  const [summaryAppt, setSummaryAppt] = React.useState<Appointment | null>(null);
 
   // Eski (yalnızca ad tutan) kayıtlara danışan kimliğini bir kez ekle.
   React.useEffect(() => {
@@ -2884,6 +2976,9 @@ const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ pa
                   </td>
                   <td style={{ textAlign: "right" }}>
                     <div className="row-actions">
+                      <button className="btn btn-outline btn-small" onClick={() => setSummaryAppt(appt)}>
+                        Özet
+                      </button>
                       <button className="btn btn-outline btn-small" onClick={() => openEdit(appt)}>Düzenle</button>
                       <button className="icon-btn" aria-label="Randevuyu sil" onClick={() => handleDelete(appt)}>
                         <Trash2 size={15} />
@@ -2904,6 +2999,17 @@ const AppointmentsView: React.FC<{ patients: Patient[]; query: string }> = ({ pa
           initial={editing ?? undefined}
           onClose={() => setModalOpen(false)}
           onSubmit={handleSubmit}
+        />
+      ) : null}
+
+      {summaryAppt ? (
+        <AppointmentSummary
+          appointment={summaryAppt}
+          patient={patients.find((patient) => patient.id === summaryAppt.patientId)}
+          getMeasurements={getMeasurements}
+          getMobileEvents={getMobileEvents}
+          onMessage={onMessage}
+          onClose={() => setSummaryAppt(null)}
         />
       ) : null}
 
@@ -3154,7 +3260,9 @@ const DrawerNotificationsTab: React.FC<{ patient: Patient }> = ({ patient }) => 
       [{ id: patient.id, name: patient.name, plan: patient.plan, compliance: patient.compliance, status: patient.status, endDate: patient.endDate }],
       getInitialMeasurements,
       loadAlertRules(rulesFromClinicSettings()),
-      loadResolvedIds()
+      loadResolvedIds(),
+      Date.now(),
+      (patientId: number) => readMobileEvents().filter((event) => event.patientId === patientId)
     ).filter((alert) => !dismissed.has(alert.id));
   }, [patient]);
 
@@ -3246,6 +3354,110 @@ const DrawerNotificationsTab: React.FC<{ patient: Patient }> = ({ patient }) => 
           </ul>
         )}
       </div>
+    </div>
+  );
+};
+
+/**
+ * KVKK sekmesi: mobil uygulamadaki rıza durumu + veri silme talebinin işlenmesi.
+ * Talep işlendiğinde danışanın tüm mobil verileri silinir ve rıza "geri çekildi"
+ * olarak kaydedilir; panel ölçümleri ve plan kayıtları etkilenmez.
+ */
+const PatientPrivacyTab: React.FC<{ patient: Patient }> = ({ patient }) => {
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const [processedAt, setProcessedAt] = React.useState<number | null>(null);
+
+  const events = readMobileEvents();
+  const patientEvents = events.filter((event) => event.patientId === patient.id);
+  const consentEvent = latestConsentFor(events, patient.id);
+  const status = consentStatusOf(events, patient.id);
+  const scope = consentEvent ? (consentEvent.payload as ConsentPayload).scope : undefined;
+  const meta = consentChipMeta(status);
+
+  const processDeletion = () => {
+    removePatientMobileEvents(patient.id);
+    ingestMobileEvent({
+      patientId: patient.id,
+      type: "consent",
+      timestamp: new Date().toISOString(),
+      payload: { status: "revoked", scope: "Veri silme talebi işlendi — mobil veriler silindi" }
+    });
+    setProcessedAt(Date.now());
+    setConfirmOpen(false);
+  };
+
+  return (
+    <div className="drawer-stack">
+      <div className="card">
+        <h3>
+          <ShieldCheck size={15} /> KVKK Rıza Durumu
+        </h3>
+        <div className="privacy-status">
+          <span className={classNames("privacy-chip", meta.className)}>{meta.label}</span>
+          <span className="muted">
+            {consentEvent ? `son güncelleme ${timeAgoTr(consentEvent.timestamp)}` : "onay kaydı yok"}
+          </span>
+        </div>
+        <ul className="privacy-meta">
+          <li>
+            <span className="muted">Kapsam</span>
+            <strong>{scope ?? "Mobil veri paylaşımı ve panele aktarım"}</strong>
+          </li>
+          <li>
+            <span className="muted">Mobil veri kaydı</span>
+            <strong>{patientEvents.length}</strong>
+          </li>
+          <li>
+            <span className="muted">Son işlem</span>
+            <strong>{consentEvent ? new Date(consentEvent.timestamp).toLocaleString("tr-TR") : "—"}</strong>
+          </li>
+        </ul>
+        {status === null ? (
+          <p className="muted">Danışandan KVKK onayı alınmadı; mobil veri paylaşımı için onay bekleniyor.</p>
+        ) : null}
+        {processedAt ? (
+          <p className="import-ok" role="status">
+            Talep işlendi: danışanın mobil verileri silindi ve rıza geri çekildi olarak kaydedildi.
+          </p>
+        ) : null}
+      </div>
+
+      {status === "deletion_requested" ? (
+        <div className="card">
+          <h3>
+            <ShieldAlert size={15} /> Veri Silme Talebi
+          </h3>
+          <p className="muted">
+            {patient.name} tüm mobil verilerinin silinmesini talep etti
+            {consentEvent ? ` (${timeAgoTr(consentEvent.timestamp)})` : ""}. Talep işlendiğinde mobilden gelen
+            veriler silinir ve rıza geri çekilmiş sayılır.
+          </p>
+          <div className="card-actions">
+            <button type="button" className="btn btn-danger btn-small" onClick={() => setConfirmOpen(true)}>
+              <Trash2 size={14} /> Talebi işle (verileri sil)
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {confirmOpen ? (
+        <ConfirmDialog
+          title="Veri silme talebini işle"
+          message={
+            <>
+              <p>
+                <strong>{patient.name}</strong> için mobilden gelen tüm veri kayıtları silinsin mi?
+              </p>
+              <p className="muted">
+                Ölçüm ve plan gibi panel kayıtları etkilenmez. Bu işlem geri alınamaz.
+              </p>
+            </>
+          }
+          confirmLabel="Verileri sil"
+          onConfirm={processDeletion}
+          onClose={() => setConfirmOpen(false)}
+        />
+      ) : null}
     </div>
   );
 };
@@ -3436,6 +3648,28 @@ const App: React.FC = () => {
 
   const getMeasurements = React.useCallback((patientId: number) => getInitialMeasurements(patientId), []);
 
+  const getMobileEvents = React.useCallback(
+    (patientId: number): MobileEvent[] => readMobileEvents().filter((event) => event.patientId === patientId),
+    []
+  );
+
+  const [composerOpen, setComposerOpen] = React.useState(false);
+  const [composerPatientId, setComposerPatientId] = React.useState<number | null>(null);
+  const [priorityApptPatientId, setPriorityApptPatientId] = React.useState<number | null>(null);
+  const [mobileEventsVersion, setMobileEventsVersion] = React.useState(0);
+
+  // Mobil veri deposu değiştiğinde (mesaj gönderimi, simülasyon vb.) öncelik listesi anında güncellenir.
+  React.useEffect(() => {
+    const onChange = () => setMobileEventsVersion((version) => version + 1);
+    window.addEventListener(MOBILE_EVENTS_CHANGED, onChange);
+    return () => window.removeEventListener(MOBILE_EVENTS_CHANGED, onChange);
+  }, []);
+
+  const openComposer = React.useCallback((patientId: number) => {
+    setComposerPatientId(patientId);
+    setComposerOpen(true);
+  }, []);
+
   const enginePatients = React.useMemo(
     () =>
       patients.map((patient) => ({
@@ -3448,6 +3682,21 @@ const App: React.FC = () => {
       })),
     [patients]
   );
+
+  // Öncelik listesi her sekme açılışında güncel veriyle yeniden hesaplanır.
+  const priorityEntries = React.useMemo(() => {
+    const rules = loadAlertRules(rulesFromClinicSettings());
+    const dismissed = new Set(loadDismissedIds());
+    const alerts = buildAlerts(
+      enginePatients,
+      getMeasurements,
+      rules,
+      loadResolvedIds(),
+      Date.now(),
+      getMobileEvents
+    ).filter((alert) => !dismissed.has(alert.id));
+    return buildPriorityList({ patients: enginePatients, getMobileEvents, getMeasurements, alerts, rules });
+  }, [enginePatients, getMeasurements, getMobileEvents, tab, mobileEventsVersion]);
 
   const openDetail = React.useCallback((patient: Patient) => {
     setSelectedPatient(patient);
@@ -3780,6 +4029,17 @@ const App: React.FC = () => {
 
           {tab === "dashboard" && (
             <section className="tab-panel">
+              <PriorityList
+                entries={priorityEntries}
+                onOpen={(patientId) => {
+                  const target = patients.find((patient) => patient.id === patientId);
+                  if (target) {
+                    openDetail(target);
+                  }
+                }}
+                onMessage={openComposer}
+                onAppointment={(patientId) => setPriorityApptPatientId(patientId)}
+              />
               <div className="grid grid-md-4">
                 <StatCard title="Toplam Danışan" value={String(dashboardStats.total)} subtitle={`${dashboardStats.active} aktif · ${riskCount} riskli`} tone="emerald" icon={<Users size={18} />} />
                 <StatCard title="Ortalama Uyum" value={`%${dashboardStats.avgCompliance}`} subtitle="Tüm danışanlar" tone="mint" icon={<CheckCircle2 size={18} />} />
@@ -3839,6 +4099,8 @@ const App: React.FC = () => {
                   </div>
                 </div>
               </div>
+
+              <ActivityFeed patients={patients} />
 
               <div className="card">
                 <div className="card-head">
@@ -3904,7 +4166,13 @@ const App: React.FC = () => {
 
           {tab === "appointments" && (
             <section className="tab-panel">
-              <AppointmentsView patients={patients} query={query} />
+              <AppointmentsView
+                patients={patients}
+                query={query}
+                getMeasurements={getMeasurements}
+                getMobileEvents={getMobileEvents}
+                onMessage={openComposer}
+              />
             </section>
           )}
 
@@ -3913,6 +4181,7 @@ const App: React.FC = () => {
               <AlertsView
                 patients={enginePatients}
                 getMeasurements={getMeasurements}
+                getMobileEvents={getMobileEvents}
                 onOpenPatient={(patientId) => {
                   const target = patients.find((patient) => patient.id === patientId);
                   if (target) {
@@ -3953,6 +4222,27 @@ const App: React.FC = () => {
             patient={patients.find((patient) => patient.id === selectedPatient?.id) ?? null}
             onClose={closeDetail}
             onUpdatePatient={handleUpdatePatient}
+            onMessage={openComposer}
+          />
+        ) : null}
+
+        {composerOpen ? (
+          <MessageComposer
+            patients={patients.map((patient) => ({ id: patient.id, name: patient.name }))}
+            initialPatientId={composerPatientId ?? undefined}
+            onClose={() => setComposerOpen(false)}
+          />
+        ) : null}
+
+        {priorityApptPatientId !== null ? (
+          <AppointmentFormModal
+            patients={patients}
+            others={readStoredAppointments()}
+            initialPatientId={priorityApptPatientId}
+            onClose={() => setPriorityApptPatientId(null)}
+            onSubmit={(draft) => {
+              appendStoredAppointment(draft);
+            }}
           />
         ) : null}
 

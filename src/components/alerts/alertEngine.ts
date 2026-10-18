@@ -1,5 +1,14 @@
 import type { MeasurementLike } from "../../types/settings";
 import type { AlertRules, PatientAlert } from "../../types/alerts";
+import {
+  eventTime,
+  eventsForPatient,
+  latestPatientEventTime,
+  localDayKey,
+  type MeasurementPayload,
+  type MobileEvent,
+  type WaterPayload
+} from "../../types/mobileData";
 
 export interface EnginePatient {
   id: number;
@@ -11,6 +20,11 @@ export interface EnginePatient {
 }
 
 type GetMeasurements = (patientId: number) => MeasurementLike[];
+type GetMobileEvents = (patientId: number) => MobileEvent[];
+
+const DAY_MS = 86_400_000;
+
+const emptyMobileEvents: GetMobileEvents = () => [];
 
 const minutesAgoIso = (now: number, minutes: number): string =>
   new Date(now - minutes * 60 * 1000).toISOString();
@@ -95,6 +109,173 @@ const deriveMissedMealAlerts = (
       timestamp: minutesAgoIso(now, 120 + patient.id * 13),
       isResolved: false
     }) as PatientAlert);
+
+/**
+ * Mobil veri akışı kuralı: `inactivityDays` gündür hiç veri girmeyen danışanı uyarır.
+ * Hiç verisi olmayan (henüz başlamamış) danışan için uyarı üretilmez.
+ */
+const deriveInactivityAlerts = (
+  patients: EnginePatient[],
+  getMobileEvents: GetMobileEvents,
+  rules: AlertRules,
+  now: number
+): PatientAlert[] => {
+  const alerts: PatientAlert[] = [];
+  for (const patient of patients) {
+    const last = latestPatientEventTime(getMobileEvents(patient.id), patient.id);
+    if (last === null) {
+      continue;
+    }
+    const days = Math.floor((now - last) / DAY_MS);
+    if (days < rules.inactivityDays) {
+      continue;
+    }
+    alerts.push({
+      id: `inactive-${patient.id}`,
+      patientId: patient.id,
+      patientName: patient.name,
+      patientPlan: patient.plan,
+      severity: days >= rules.inactivityDays + 2 ? "critical" : "warning",
+      category: "inactivity",
+      title: `${days} gündür veri yok`,
+      description: `En son ${new Date(last).toLocaleDateString("tr-TR")} tarihinde veri girdi. Veri girişi ${rules.inactivityDays} günü aştı — hatırlatma gönderin.`,
+      timestamp: minutesAgoIso(now, 30 + patient.id * 6),
+      isResolved: false
+    });
+  }
+  return alerts;
+};
+
+/** Hafta indeksi → o haftanın ortalama kilosu (yoksa null). */
+const weeklyAverageWeight = (weights: Array<{ t: number; w: number }>, now: number): Map<number, number> => {
+  const buckets = new Map<number, number[]>();
+  for (const { t, w } of weights) {
+    const index = Math.floor((now - t) / (7 * DAY_MS));
+    if (index < 0) {
+      continue;
+    }
+    buckets.set(index, [...(buckets.get(index) ?? []), w]);
+  }
+  const averages = new Map<number, number>();
+  for (const [index, values] of buckets.entries()) {
+    averages.set(index, values.reduce((sum, value) => sum + value, 0) / values.length);
+  }
+  return averages;
+};
+
+/**
+ * Mobil ölçüm akışı kuralı: kilo `weightGainWeeks` hafta üst üste artmışsa uyarır.
+ * Yalnızca kesintisiz haftalık veri olduğunda tetiklenir; arada veri yoksa uyarı üretilmez.
+ */
+const deriveWeightGainAlerts = (
+  patients: EnginePatient[],
+  getMobileEvents: GetMobileEvents,
+  rules: AlertRules,
+  now: number
+): PatientAlert[] => {
+  const alerts: PatientAlert[] = [];
+  const neededWeeks = Math.max(1, Math.round(rules.weightGainWeeks));
+  for (const patient of patients) {
+    const weights = eventsForPatient(getMobileEvents(patient.id), patient.id)
+      .filter((event) => event.type === "measurement")
+      .map((event) => ({ t: eventTime(event), w: (event.payload as MeasurementPayload).weightKg }))
+      .filter((row): row is { t: number; w: number } => typeof row.w === "number")
+      .sort((a, b) => a.t - b.t);
+    if (weights.length < neededWeeks + 1) {
+      continue;
+    }
+    const averages = weeklyAverageWeight(weights, now);
+    const series: number[] = [];
+    let complete = true;
+    for (let index = neededWeeks; index >= 0; index -= 1) {
+      const value = averages.get(index);
+      if (value === undefined) {
+        complete = false;
+        break;
+      }
+      series.push(value);
+    }
+    if (!complete || series.length < 2) {
+      continue;
+    }
+    const increasing = series.every((value, index) => index === 0 || value > series[index - 1]);
+    if (!increasing) {
+      continue;
+    }
+    const first = series[0];
+    const lastValue = series[series.length - 1];
+    alerts.push({
+      id: `gain-${patient.id}`,
+      patientId: patient.id,
+      patientName: patient.name,
+      patientPlan: patient.plan,
+      severity: "warning",
+      category: "weight_gain",
+      title: "Kilo artış eğilimi",
+      description: `Son ${neededWeeks} haftada kilo istikrarlı arttı (${first.toFixed(1)} kg → ${lastValue.toFixed(1)} kg). Plan gözden geçirilmeli.`,
+      timestamp: minutesAgoIso(now, 70 + patient.id * 8),
+      isResolved: false
+    });
+  }
+  return alerts;
+};
+
+/**
+ * Mobil su akışı kuralı: son `waterMissDays` tam günde günlük su hedefinin altında kalan
+ * danışanı uyarır. Her gün için veri gerekir; veri olmayan gün uyarıyı tetiklemez (yanlış pozitif önlenir).
+ */
+const deriveWaterTargetAlerts = (
+  patients: EnginePatient[],
+  getMobileEvents: GetMobileEvents,
+  rules: AlertRules,
+  now: number
+): PatientAlert[] => {
+  const alerts: PatientAlert[] = [];
+  const days = Math.max(1, Math.round(rules.waterMissDays));
+  const goal = rules.waterGoalMl > 0 ? rules.waterGoalMl : 2000;
+  for (const patient of patients) {
+    const totals = new Map<string, number>();
+    for (const event of eventsForPatient(getMobileEvents(patient.id), patient.id)) {
+      if (event.type !== "water") {
+        continue;
+      }
+      const ml = (event.payload as WaterPayload).ml;
+      if (typeof ml !== "number") {
+        continue;
+      }
+      const key = localDayKey(event.timestamp);
+      totals.set(key, (totals.get(key) ?? 0) + ml);
+    }
+    if (totals.size === 0) {
+      continue;
+    }
+    let allMissed = true;
+    for (let offset = 1; offset <= days; offset += 1) {
+      const key = localDayKey(new Date(now - offset * DAY_MS).toISOString());
+      const total = totals.get(key);
+      if (total === undefined || total >= goal) {
+        allMissed = false;
+        break;
+      }
+    }
+    if (!allMissed) {
+      continue;
+    }
+    alerts.push({
+      id: `water-${patient.id}`,
+      patientId: patient.id,
+      patientName: patient.name,
+      patientPlan: patient.plan,
+      severity: "warning",
+      category: "water_target",
+      title: "Su hedefi tutturulamıyor",
+      description: `Son ${days} gündür günlük su hedefinin (${goal} ml) altında kalıyor. Hatırlatma gönderin.`,
+      timestamp: minutesAgoIso(now, 110 + patient.id * 5),
+      isResolved: false
+    });
+  }
+  return alerts;
+};
 
 /** YYYY-MM-DD → bugüne göre kalan tam gün sayısı (negatif = süresi geçmiş). Geçersizse null. */
 const daysUntil = (endDate: string, now: number): number | null => {
@@ -188,13 +369,17 @@ export const buildAlerts = (
   getMeasurements: GetMeasurements,
   rules: AlertRules,
   resolvedIds: string[],
-  now: number = Date.now()
+  now: number = Date.now(),
+  getMobileEvents: GetMobileEvents = emptyMobileEvents
 ): PatientAlert[] => {
   const all = [
     ...deriveAdherenceAlerts(patients, rules, now),
     ...derivePlateauAlerts(patients, getMeasurements, rules, now),
     ...deriveMissedMealAlerts(patients, rules, now),
-    ...derivePlanExpirationAlerts(patients, rules, now)
+    ...derivePlanExpirationAlerts(patients, rules, now),
+    ...deriveInactivityAlerts(patients, getMobileEvents, rules, now),
+    ...deriveWeightGainAlerts(patients, getMobileEvents, rules, now),
+    ...deriveWaterTargetAlerts(patients, getMobileEvents, rules, now)
   ];
   const resolved = new Set(resolvedIds);
   return all

@@ -112,6 +112,51 @@ export const AlertRulesPanel: React.FC<Props> = ({ rules, onChange, onSave, onRe
               accent="#8b5cf6"
               onChange={(value) => onChange({ plateauWeeks: value })}
             />
+            <SliderField
+              id="rule-inactivity"
+              label="Veri Girmeme Süresi"
+              hint="Danışan bu kadar gündür veri girmezse hareketsizlik uyarısı üretilir."
+              min={1}
+              max={14}
+              value={rules.inactivityDays}
+              valueLabel={`${rules.inactivityDays} gün`}
+              accent="#0ea5e9"
+              onChange={(value) => onChange({ inactivityDays: value })}
+            />
+            <SliderField
+              id="rule-weight-gain"
+              label="Kilo Artış Penceresi"
+              hint="Kilo bu kadar hafta üst üste artarsa uyarı üretilir."
+              min={1}
+              max={8}
+              value={rules.weightGainWeeks}
+              valueLabel={`${rules.weightGainWeeks} hafta`}
+              accent="#f97316"
+              onChange={(value) => onChange({ weightGainWeeks: value })}
+            />
+            <SliderField
+              id="rule-water-miss"
+              label="Su Hedefi Kaçırma Süresi"
+              hint="Günlük su hedefi bu kadar gün üst üste tutturulamazsa uyar."
+              min={1}
+              max={7}
+              value={rules.waterMissDays}
+              valueLabel={`${rules.waterMissDays} gün`}
+              accent="#06b6d4"
+              onChange={(value) => onChange({ waterMissDays: value })}
+            />
+            <SliderField
+              id="rule-water-goal"
+              label="Günlük Su Hedefi"
+              hint="Danışan kendi hedefini belirtmezse bu değer kullanılır."
+              min={1000}
+              max={4000}
+              step={100}
+              value={rules.waterGoalMl}
+              valueLabel={`${rules.waterGoalMl} ml`}
+              accent="#0891b2"
+              onChange={(value) => onChange({ waterGoalMl: value })}
+            />
           </div>
         </SectionCard>
 

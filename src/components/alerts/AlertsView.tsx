@@ -5,6 +5,7 @@ import {
   Bell,
   CalendarClock,
   CheckCircle2,
+  Droplets,
   Eye,
   Inbox,
   Info,
@@ -20,6 +21,7 @@ import {
 } from "lucide-react";
 import type { MeasurementLike } from "../../types/settings";
 import { loadSettings, saveSettings } from "../../types/settings";
+import type { MobileEvent } from "../../types/mobileData";
 import type { AlertCategory, AlertRules, AlertSeverity, PatientAlert } from "../../types/alerts";
 import {
   CATEGORY_META,
@@ -40,6 +42,7 @@ import { classNames } from "../settings/classNames";
 interface Props {
   patients: EnginePatient[];
   getMeasurements: (patientId: number) => MeasurementLike[];
+  getMobileEvents: (patientId: number) => MobileEvent[];
   onOpenPatient: (patientId: number) => void;
 }
 
@@ -75,7 +78,10 @@ const CATEGORY_ICON: Record<AlertCategory, React.ReactNode> = {
   adherence: <TrendingDown size={12} />,
   missed_meal: <UtensilsCrossed size={12} />,
   plan_expiration: <CalendarClock size={12} />,
-  weight_plateau: <Scale size={12} />
+  weight_plateau: <Scale size={12} />,
+  weight_gain: <TrendingDown size={12} />,
+  inactivity: <Inbox size={12} />,
+  water_target: <Droplets size={12} />
 };
 
 const MetricChip: React.FC<{
@@ -169,7 +175,7 @@ const AlertCard: React.FC<{
   );
 };
 
-export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, onOpenPatient }) => {
+export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, getMobileEvents, onOpenPatient }) => {
   const [tab, setTab] = React.useState<AlertsTab>("inbox");
   const [rules, setRules] = React.useState<AlertRules>(() => loadAlertRules(rulesFromClinicSettings()));
   const [savedRules, setSavedRules] = React.useState<AlertRules>(() => loadAlertRules(rulesFromClinicSettings()));
@@ -190,10 +196,10 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, onOpenP
 
   const alerts = React.useMemo(() => {
     const dismissed = new Set(dismissedIds);
-    return buildAlerts(patients, getMeasurements, savedRules, resolvedIds).filter(
+    return buildAlerts(patients, getMeasurements, savedRules, resolvedIds, Date.now(), getMobileEvents).filter(
       (alert) => !dismissed.has(alert.id)
     );
-  }, [patients, getMeasurements, savedRules, resolvedIds, dismissedIds]);
+  }, [patients, getMeasurements, getMobileEvents, savedRules, resolvedIds, dismissedIds]);
 
   const quietActive = React.useMemo(
     () => isQuietNow(savedRules.quietHoursRange, savedRules.quietHoursEnabled),

@@ -3,7 +3,14 @@
 import { loadSettings } from "./settings";
 
 export type AlertSeverity = "critical" | "warning" | "info";
-export type AlertCategory = "adherence" | "missed_meal" | "plan_expiration" | "weight_plateau";
+export type AlertCategory =
+  | "adherence"
+  | "missed_meal"
+  | "plan_expiration"
+  | "weight_plateau"
+  | "weight_gain"
+  | "inactivity"
+  | "water_target";
 
 export type PatientAlert = {
   id: string;
@@ -22,8 +29,16 @@ export type PatientAlert = {
 export type AlertRules = {
   complianceThreshold: number; // e.g. 70%
   missedMealHours: number; // e.g. 4 hours
-  planExpiryNoticeDays: number; // e.g. 2 days
+  planExpiryNoticeDays: number; // e.g. 7 days
   plateauWeeks: number; // e.g. 2 weeks of stable weight
+  /** Kaç gündür veri girmezse "hareketsizlik" uyarısı üretilsin. */
+  inactivityDays: number; // e.g. 2 days
+  /** Kilo kaç hafta üst üste artarsa uyarılsın. */
+  weightGainWeeks: number; // e.g. 2 weeks
+  /** Su hedefi kaç gün üst üste tutturulamazsa uyarılsın. */
+  waterMissDays: number; // e.g. 3 days
+  /** Günlük su hedefi (ml) — danışan kendi hedefini belirtmezse kullanılır. */
+  waterGoalMl: number; // e.g. 2000 ml
   quietHoursEnabled: boolean;
   quietHoursRange: [string, string]; // ["23:00", "07:00"]
   autoNotifyPatient: boolean;
@@ -38,8 +53,12 @@ export const ALERT_DISMISSED_STORAGE_KEY = "dp_alert_dismissed_v1";
 export const DEFAULT_ALERT_RULES: AlertRules = {
   complianceThreshold: 70,
   missedMealHours: 4,
-  planExpiryNoticeDays: 2,
+  planExpiryNoticeDays: 7,
   plateauWeeks: 2,
+  inactivityDays: 2,
+  weightGainWeeks: 2,
+  waterMissDays: 3,
+  waterGoalMl: 2000,
   quietHoursEnabled: true,
   quietHoursRange: ["23:00", "07:00"],
   autoNotifyPatient: true,
@@ -96,6 +115,10 @@ export const loadAlertRules = (fallback?: AlertRules): AlertRules => {
       missedMealHours: parsed.missedMealHours as number,
       planExpiryNoticeDays: parsed.planExpiryNoticeDays as number,
       plateauWeeks: typeof parsed.plateauWeeks === "number" ? (parsed.plateauWeeks as number) : base.plateauWeeks,
+      inactivityDays: typeof parsed.inactivityDays === "number" ? (parsed.inactivityDays as number) : base.inactivityDays,
+      weightGainWeeks: typeof parsed.weightGainWeeks === "number" ? (parsed.weightGainWeeks as number) : base.weightGainWeeks,
+      waterMissDays: typeof parsed.waterMissDays === "number" ? (parsed.waterMissDays as number) : base.waterMissDays,
+      waterGoalMl: typeof parsed.waterGoalMl === "number" ? (parsed.waterGoalMl as number) : base.waterGoalMl,
       quietHoursEnabled: parsed.quietHoursEnabled as boolean,
       quietHoursRange: (parsed.quietHoursRange as [string, string]).slice(0, 2) as [string, string],
       autoNotifyPatient: parsed.autoNotifyPatient as boolean,
@@ -189,5 +212,8 @@ export const CATEGORY_META: Record<AlertCategory, { label: string }> = {
   adherence: { label: "Uyum" },
   missed_meal: { label: "Kaçan Öğün" },
   plan_expiration: { label: "Plan Bitişi" },
-  weight_plateau: { label: "Kilo Platosu" }
+  weight_plateau: { label: "Kilo Platosu" },
+  weight_gain: { label: "Kilo Artışı" },
+  inactivity: { label: "Veri Akışı" },
+  water_target: { label: "Su Hedefi" }
 };
