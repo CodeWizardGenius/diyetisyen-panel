@@ -50,7 +50,8 @@ import {
   Calculator,
   FileText,
   ShieldCheck,
-  ShieldAlert
+  ShieldAlert,
+  AlertCircle
 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { SettingsView } from "./components/settings/SettingsView";
@@ -62,6 +63,8 @@ import { WeeklyReport } from "./components/reports/WeeklyReport";
 import { AppointmentRequestPage } from "./components/appointments/AppointmentRequestPage";
 import { buildAppointmentRequestUrl } from "./types/patientLinks";
 import { PriorityList } from "./components/dashboard/PriorityList";
+import { hashPassword, verifyPassword } from "./utils/crypto";
+import { useToast } from "./components/ui/toast";
 import { buildPriorityList } from "./components/dashboard/priority";
 import { PatientTimeline } from "./components/patient/PatientTimeline";
 import { AppointmentSummary } from "./components/appointments/AppointmentSummary";
@@ -388,8 +391,10 @@ const formatMMSS = (totalSec: number) => {
 /** localStorage ile senkronize state. SSR ve kota/erişim hatalarına karşı güvenli. */
 function usePersistentState<T>(
   key: string,
-  initial: T | (() => T)
+  initial: T | (() => T),
+  options?: { debounceMs?: number; onError?: (error: Error) => void }
 ): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const { debounceMs = 300, onError } = options ?? {};
   const [state, setState] = React.useState<T>(() => {
     if (typeof window !== "undefined") {
       try {
@@ -404,18 +409,65 @@ function usePersistentState<T>(
     return typeof initial === "function" ? (initial as () => T)() : initial;
   });
 
-  React.useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    try {
-      localStorage.setItem(key, JSON.stringify(state));
-    } catch {
-      // depolama kullanılamıyor / kota dolu — sessizce yoksay
-    }
-  }, [key, state]);
+  const timeoutRef = React.useRef<number | null>(null);
+  const pendingRef = React.useRef<T | null>(null);
 
-  return [state, setState];
+  const flush = React.useCallback(() => {
+    if (pendingRef.current === null) return;
+    if (typeof window === "undefined") return;
+    try {
+      localStorage.setItem(key, JSON.stringify(pendingRef.current));
+      pendingRef.current = null;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      if (error.name === "QuotaExceededError" || error.message.includes("quota")) {
+        onError?.(new Error("Depolama alanı dolu. Bazı veriler kaydedilemedi."));
+      } else if (error.name === "SecurityError" || error.message.includes("private")) {
+        onError?.(new Error("Özel/privacy modunda depolama erişilemiyor."));
+      } else {
+        onError?.(new Error(`Veri kaydedilemedi: ${error.message}`));
+      }
+    }
+  }, [key, onError]);
+
+  React.useEffect(() => {
+    pendingRef.current = state;
+    if (timeoutRef.current !== null) {
+      window.clearTimeout(timeoutRef.current);
+    }
+    timeoutRef.current = window.setTimeout(flush, debounceMs);
+    return () => {
+      if (timeoutRef.current !== null) {
+        window.clearTimeout(timeoutRef.current);
+      }
+    };
+  }, [key, state, debounceMs, flush]);
+
+  React.useEffect(() => {
+    return () => {
+      if (timeoutRef.current !== null) {
+        window.clearTimeout(timeoutRef.current);
+        flush();
+      }
+    };
+  }, [flush]);
+
+  const setStateWithFlush: React.Dispatch<React.SetStateAction<T>> = React.useCallback(
+    (action) => {
+      setState((prev) => {
+        const next = typeof action === "function" ? (action as (prev: T) => T)(prev) : action;
+        pendingRef.current = next;
+        if (timeoutRef.current !== null) {
+          window.clearTimeout(timeoutRef.current);
+        }
+        timeoutRef.current = window.setTimeout(flush, debounceMs);
+        return next;
+      });
+    },
+    [flush, debounceMs]
+  );
+
+  return [state, setStateWithFlush];
 }
 
 const FOCUSABLE_SELECTOR =
@@ -1910,17 +1962,23 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
   patients,
   onUpdatePatient
 }) => {
+  const { showToast } = useToast();
+  const handleStorageError = React.useCallback(
+    (error: Error) => showToast(error.message, "error"),
+    [showToast]
+  );
   // Klinik ayarları sekme açılırken bir kez okunur (Ayarlar ayrı sekmede düzenlenir).
   const clinic = React.useMemo(() => loadSettings(), []);
-  const [items, setItems] = usePersistentState<PlanItem[]>("dp_plan_items", DEFAULT_PLAN_ITEMS);
-  const [repeat, setRepeat] = usePersistentState("dp_plan_repeat", { every: 14, unit: "day" });
-  const [templateName, setTemplateName] = usePersistentState("dp_plan_name", "2 Haftalık Fit Plan");
+  const [items, setItems] = usePersistentState<PlanItem[]>("dp_plan_items", DEFAULT_PLAN_ITEMS, { onError: handleStorageError });
+  const [repeat, setRepeat] = usePersistentState("dp_plan_repeat", { every: 14, unit: "day" }, { onError: handleStorageError });
+  const [templateName, setTemplateName] = usePersistentState("dp_plan_name", "2 Haftalık Fit Plan", { onError: handleStorageError });
   // Diyetisyen adı sabit değil; Ayarlar > Profil & Klinik'teki gerçek isimden gelir.
   const [dietitian, setDietitian] = React.useState(() => loadSettings().profile.dietitianName);
-  const [patientId, setPatientId] = usePersistentState<number>("dp_plan_patient", patients[0]?.id ?? 1);
+  const [patientId, setPatientId] = usePersistentState<number>("dp_plan_patient", patients[0]?.id ?? 1, { onError: handleStorageError });
   const [notes, setNotes] = usePersistentState(
     "dp_plan_notes",
-    "Bol su tüketin (günde en az 2 lt). Öğün saatlerine uymaya özen gösterin."
+    "Bol su tüketin (günde en az 2 lt). Öğün saatlerine uymaya özen gösterin.",
+    { onError: handleStorageError }
   );
 
   const [profile, setProfile] = usePersistentState<BmrInput>("dp_plan_profile", {
@@ -1928,14 +1986,14 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
     heightCm: 170,
     age: 35,
     sex: "kadin"
-  });
-  const [activity, setActivity] = usePersistentState<ActivityLevel>("dp_plan_activity", "orta");
-  const [goal, setGoal] = usePersistentState<WeightGoal>("dp_plan_goal", "verme");
+  }, { onError: handleStorageError });
+  const [activity, setActivity] = usePersistentState<ActivityLevel>("dp_plan_activity", "orta", { onError: handleStorageError });
+  const [goal, setGoal] = usePersistentState<WeightGoal>("dp_plan_goal", "verme", { onError: handleStorageError });
   // Makrolar seçili hedefin dağılımıyla başlar (hedef değişince de ona döner);
   // ayarlardaki klinik varsayılanı "Klinik varsayılanı" ile uygulanır.
   const [macros, setMacros] = usePersistentState<MacroSplit>("dp_plan_macros", () => ({
     ...GOAL_ADJUSTMENTS[goal].macros
-  }));
+  }), { onError: handleStorageError });
   const clinicMacros = React.useMemo(() => {
     const { macroPresetId, customMacros } = clinic.nutrition;
     const preset = MACRO_PRESETS.find((item) => item.id === macroPresetId);
@@ -2681,11 +2739,17 @@ const TopHeader: React.FC<{
   onLogout: (clearLocalData: boolean) => void;
   onMenuToggle: () => void;
 }> = ({ query, onQuery, showSearch, searchPlaceholder, user, remainingSec, onExtend, onLogout, onMenuToggle }) => {
+  const { showToast } = useToast();
+  const handleStorageError = React.useCallback(
+    (error: Error) => showToast(error.message, "error"),
+    [showToast]
+  );
   const [showNotifications, setShowNotifications] = React.useState(false);
   const [showProfile, setShowProfile] = React.useState(false);
   const [notifications, setNotifications] = usePersistentState<AppNotification[]>(
     "dp_notifications",
-    SEED_NOTIFICATIONS
+    SEED_NOTIFICATIONS,
+    { onError: handleStorageError }
   );
   const headerRef = React.useRef<HTMLDivElement>(null);
   // Unvan Ayarlar > Profil'den; ayar kaydedildiğinde bir sonraki çizimde güncellenir.
@@ -3007,7 +3071,12 @@ const AppointmentsView: React.FC<{
   getMobileEvents: (patientId: number) => MobileEvent[];
   onMessage: (patientId: number) => void;
 }> = ({ patients, query, getMeasurements, getMobileEvents, onMessage }) => {
-  const [appointments, setAppointments] = usePersistentState<Appointment[]>(APPOINTMENTS_STORAGE_KEY, SEED_APPOINTMENTS);
+  const { showToast } = useToast();
+  const handleStorageError = React.useCallback(
+    (error: Error) => showToast(error.message, "error"),
+    [showToast]
+  );
+  const [appointments, setAppointments] = usePersistentState<Appointment[]>(APPOINTMENTS_STORAGE_KEY, SEED_APPOINTMENTS, { onError: handleStorageError });
   const [modalOpen, setModalOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Appointment | null>(null);
   const [apptToDelete, setApptToDelete] = React.useState<Appointment | null>(null);
@@ -3918,14 +3987,21 @@ const PatientPrivacyTab: React.FC<{ patient: Patient }> = ({ patient }) => {
 const App: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const { showToast } = useToast();
   const tab = pathToTab(location.pathname);
   const setTab = React.useCallback(
     (next: AppTab) => navigate(next === "dashboard" ? "/" : `/${next}`),
     [navigate]
   );
 
+  const handleStorageError = React.useCallback(
+    (error: Error) => showToast(error.message, "error"),
+    [showToast]
+  );
+
   const [query, setQuery] = React.useState("");
-  const [patients, setPatients] = usePersistentState<Patient[]>("dp_patients", DEMO_PATIENTS);
+  const initialPatients = (import.meta.env.DEV ? DEMO_PATIENTS : []) as Patient[];
+  const [patients, setPatients] = usePersistentState<Patient[]>("dp_patients", initialPatients, { onError: handleStorageError });
   const [selectedPatient, setSelectedPatient] = React.useState<Patient | null>(null);
   const [showDetail, setShowDetail] = React.useState(false);
   const [patientModalOpen, setPatientModalOpen] = React.useState(false);
@@ -3949,6 +4025,7 @@ const App: React.FC = () => {
    */
   const handleLogout = React.useCallback((clearLocalData = false) => {
     clearAuthStorage();
+    localStorage.removeItem("dp_auth_user_hash");
     if (clearLocalData) {
       clearSessionDataStorage();
     }
@@ -4083,7 +4160,7 @@ const App: React.FC = () => {
     [auth, isAuthed]
   );
 
-  const handleLogin = React.useCallback((email: string, password: string) => {
+  const handleLogin = React.useCallback(async (email: string, password: string) => {
     if (!email || !password) {
       return;
     }
@@ -4097,6 +4174,12 @@ const App: React.FC = () => {
     setAuth(next);
     setIsAuthed(true);
     setRemainingSec(Math.floor((expiration - Date.now()) / 1000));
+    try {
+      const hash = await hashPassword(password);
+      localStorage.setItem("dp_auth_user_hash", hash);
+    } catch {
+      // hashleme başarısız olursa sessizce devam et
+    }
   }, []);
 
   const getMeasurements = React.useCallback((patientId: number) => getInitialMeasurements(patientId), []);

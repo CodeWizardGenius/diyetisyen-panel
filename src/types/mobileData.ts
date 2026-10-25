@@ -521,9 +521,14 @@ export const MOBILE_EVENT_EXAMPLES: Record<MobileEventType, { payload: Record<st
 /**
  * İlk açılışta akışı ve uyarı motorunu beslemek için örnek mobil veri üretir.
  * Depoda kayıt varsa hiçbir şey yapmaz.
+ * Sadece development modunda çalışır (import.meta.env.DEV).
  */
 export const seedMobileDataIfEmpty = (now: number = Date.now()): void => {
   if (typeof window === "undefined") {
+    return;
+  }
+  // Sadece development modunda seed ata
+  if (typeof import.meta !== "undefined" && import.meta.env && !import.meta.env.DEV) {
     return;
   }
   try {

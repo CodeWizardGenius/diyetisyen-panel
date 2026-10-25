@@ -6,28 +6,18 @@
     <title>Diyetisyen Paneli</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="theme-color" content="#059669" />
-    <script>
-      // React yüklenmeden önce kayıtlı temayı uygula: açılışta yanlış temayla
-      // boyama (FOUC) ve Ayarlar'a geçince karanlığa "atlama" tamamen önlenir.
-      (function () {
-        try {
-          var mode = localStorage.getItem("dp_theme") || "light";
-          var resolved =
-            mode === "system"
-              ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
-              : mode === "dark"
-              ? "dark"
-              : "light";
-          document.documentElement.dataset.theme = resolved;
-        } catch (e) {
-          document.documentElement.dataset.theme = "light";
-        }
-      })();
-    </script>
+    <!--
+      CSP meta etiketi BUILD sırasında vite.config.ts (injectCspMeta) tarafından eklenir;
+      dev sunucusu React Fast Refresh için inline script kullandığından statik meta dev'i bozar.
+      `frame-ancestors` meta ile yok sayıldığı için meta'da yoktur; HTTP başlığı gerektiren
+      tüm güvenlik başlıkları public/_headers içindedir (GitHub Pages _headers'ı yok sayar;
+      Netlify/Cloudflare Pages otomatik uygular).
+    -->
+    <!-- Tema, React'ten önce harici dosyadan uygulanır (inline script CSP'ye takılmaz). -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

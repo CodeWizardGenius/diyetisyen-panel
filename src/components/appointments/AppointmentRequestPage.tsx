@@ -1,6 +1,6 @@
 import React from "react";
 import { CalendarDays, CheckCircle2, Leaf, Send } from "lucide-react";
-import { isValidPatientLink } from "../../types/patientLinks";
+import { isValidPatientLink, markPatientLinkUsed } from "../../types/patientLinks";
 
 const APPOINTMENTS_STORAGE_KEY = "dp_appointments";
 const PATIENTS_STORAGE_KEY = "dp_patients";
@@ -81,6 +81,9 @@ export const AppointmentRequestPage: React.FC<Props> = ({ patientId, token }) =>
       type,
       status: "Bekliyor"
     });
+    if (valid) {
+      markPatientLinkUsed(patientId);
+    }
     setError("");
     setSent(true);
   };

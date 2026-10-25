@@ -5,6 +5,7 @@ import { HashRouter } from "react-router-dom";
 import App from "./App";
 import { ThemeProvider } from "./context/ThemeContext";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ToastProvider } from "./components/ui/toast";
 import { seedMobileDataIfEmpty } from "./types/mobileData";
 import "./main.css";
 
@@ -19,10 +20,12 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ThemeProvider>
       <ErrorBoundary>
-        {/* v7 davranışlarına şimdiden geç (konsoldaki "Future Flag" uyarıları kalkar). */}
-        <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-          <App />
-        </HashRouter>
+        <ToastProvider>
+          {/* v7 davranışlarına şimdiden geç (konsoldaki "Future Flag" uyarıları kalkar). */}
+          <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+            <App />
+          </HashRouter>
+        </ToastProvider>
       </ErrorBoundary>
     </ThemeProvider>
   </React.StrictMode>
