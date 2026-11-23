@@ -63,12 +63,51 @@ import { WeeklyReport } from "./components/reports/WeeklyReport";
 import { AppointmentRequestPage } from "./components/appointments/AppointmentRequestPage";
 import { buildAppointmentRequestUrl } from "./types/patientLinks";
 import { PriorityList } from "./components/dashboard/PriorityList";
-import { hashPassword, verifyPassword } from "./utils/crypto";
 import { useToast } from "./components/ui/toast";
 import { buildPriorityList } from "./components/dashboard/priority";
 import { PatientTimeline } from "./components/patient/PatientTimeline";
 import { AppointmentSummary } from "./components/appointments/AppointmentSummary";
 import { MessageComposer } from "./components/messaging/MessageComposer";
+import {
+  API_MODE,
+  IS_HTTP,
+  authApi,
+  bootstrapCore,
+  cache,
+  clearTokens as clearApiTokens,
+  errorMessage,
+  getAccessToken,
+  getStoredUser,
+  hasRefreshToken,
+  hydratePatient,
+  isPatientLoaded,
+  measurementsApi,
+  patientsApi,
+  plansApi,
+  trackingApi,
+  appointmentsApi,
+  consentApi,
+  messagesApi,
+  notificationsApi,
+  insightApi,
+  settingsApi,
+  resetServerCache,
+  notifyServerData,
+  subscribeServerData,
+  onSessionCleared,
+  IDLE_EXPIRES_STORAGE_KEY
+} from "./api";
+import type {
+  Appointment,
+  AppointmentDraft,
+  AppointmentRequest,
+  AppointmentStatus,
+  Measurement,
+  MealGridState,
+  PatientDraft,
+  PlanItem,
+  SavedPatientPlan
+} from "./api/types";
 import {
   clearMobileEvents,
   consentStatusOf,
@@ -107,18 +146,6 @@ import {
 } from "./types/alerts";
 import { THEME_STORAGE_KEY } from "./context/ThemeContext";
 
-type Measurement = {
-  id: string;
-  date: string; // ISO YYYY-MM-DD
-  weightKg: number;
-  heightCm: number;
-  bodyFatPercentage: number;
-  muscleMassKg: number;
-  waistCm: number;
-  hipCm: number;
-  notes?: string;
-};
-
 type BMICategory = "Zayıf" | "Normal" | "Fazla Kilolu" | "Obez";
 
 const calculateBMI = (weightKg: number, heightCm: number): number => {
@@ -151,6 +178,41 @@ const formatDelta = (current: number, previous: number, unit: string, decimals =
   const sign = diff > 0 ? "+" : "-";
   return `${sign}${Math.abs(diff).toFixed(decimals)} ${unit}`;
 };
+
+/** Sunucu "veri yok" için null döner; hesaplarda 0'a, gösterimde "—"ye çevrilir. */
+const asNumber = (value: number | null | undefined): number =>
+  typeof value === "number" ? value : 0;
+
+const formatMetric = (value: number | null | undefined, suffix = "", decimals = 1): string =>
+  typeof value === "number" ? `${value.toFixed(decimals)}${suffix}` : "—";
+
+const numericDelta = (
+  current: number | null | undefined,
+  previous: number | null | undefined
+): number | null =>
+  typeof current === "number" && typeof previous === "number" ? current - previous : null;
+
+const isoDaysAgo = (days: number): string => {
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return date.toISOString().slice(0, 10);
+};
+
+const isoDaysAhead = (days: number): string => isoDaysAgo(-days);
+
+/** Ölçüm listesini kilo içeren satırlarla `MeasurementLike` biçimine çevirir. */
+const toMeasurementLikes = (list: Measurement[]): MeasurementLike[] =>
+  list
+    .filter((item): item is Measurement & { weightKg: number } => typeof item.weightKg === "number")
+    .map((item) => ({
+      date: item.date,
+      weightKg: item.weightKg,
+      heightCm: asNumber(item.heightCm),
+      bodyFatPercentage: asNumber(item.bodyFatPercentage),
+      muscleMassKg: asNumber(item.muscleMassKg),
+      waistCm: asNumber(item.waistCm),
+      hipCm: asNumber(item.hipCm)
+    }));
 
 type Sex = "kadin" | "erkek";
 type ActivityLevel = "sedanter" | "hafif" | "orta" | "aktif" | "cokAktif";
@@ -247,6 +309,9 @@ const MOCK_MEASUREMENTS: Record<number, Measurement[]> = {
 const MEASUREMENTS_STORAGE_KEY = "dp_measurements";
 
 const readStoredMeasurements = (): Record<number, Measurement[]> => {
+  if (IS_HTTP) {
+    return cache.measurements;
+  }
   if (typeof window === "undefined") {
     return {};
   }
@@ -260,6 +325,10 @@ const readStoredMeasurements = (): Record<number, Measurement[]> => {
 
 const writeStoredMeasurements = (patientId: number, list: Measurement[]): void => {
   if (typeof window === "undefined") {
+    return;
+  }
+  if (IS_HTTP) {
+    cache.measurements[patientId] = list;
     return;
   }
   try {
@@ -278,6 +347,12 @@ const PATIENT_REMINDERS_KEY = "dp_patient_reminders";
 const mealGridKey = (patientId: number) => `dp_meal_grid_${patientId}`;
 
 const readPatientRecord = <T,>(key: string): Record<number, T> => {
+  if (IS_HTTP) {
+    if (key === PATIENT_PLANS_KEY) return cache.plans as unknown as Record<number, T>;
+    if (key === PATIENT_NOTES_KEY) return cache.notes as unknown as Record<number, T>;
+    if (key === PATIENT_REMINDERS_KEY) return cache.reminders as unknown as Record<number, T>;
+    return {};
+  }
   try {
     const raw = localStorage.getItem(key);
     const parsed: unknown = raw ? JSON.parse(raw) : {};
@@ -292,6 +367,17 @@ const readPatientRecord = <T,>(key: string): Record<number, T> => {
 /** Danışanın kaydını yazar; `value` undefined ise kaydı siler. */
 const writePatientEntry = <T,>(key: string, patientId: number, value: T | undefined): void => {
   try {
+    if (IS_HTTP) {
+      if (key === PATIENT_PLANS_KEY) cache.plans[patientId] = (value ?? null) as unknown as SavedPatientPlan | null;
+      else if (key === PATIENT_NOTES_KEY) {
+        if (value === undefined) delete cache.notes[patientId];
+        else cache.notes[patientId] = String(value);
+      } else if (key === PATIENT_REMINDERS_KEY) {
+        if (value === undefined) delete cache.reminders[patientId];
+        else cache.reminders[patientId] = value as unknown as Record<string, string>;
+      }
+      return;
+    }
     const all = readPatientRecord<T>(key);
     if (value === undefined) {
       delete all[patientId];
@@ -342,6 +428,9 @@ const clearPatientScopedStorage = (): void => {
 };
 
 const getInitialMeasurements = (patientId: number): Measurement[] => {
+  if (IS_HTTP) {
+    return [...(cache.measurements[patientId] ?? [])].sort((a, b) => a.date.localeCompare(b.date));
+  }
   const stored = readStoredMeasurements()[patientId];
   if (stored) {
     return [...stored].sort((a, b) => a.date.localeCompare(b.date));
@@ -353,7 +442,11 @@ const getInitialMeasurements = (patientId: number): Measurement[] => {
   return [];
 };
 
-/** Örnek veri: hiçbir danışanın öğün çizelgesinde işaret yokken dashboard grafiklerinde gösterilir. */
+/** Gerçek API modunda öğün verisi yokken grafik yerine gösterilir (sahte veri gösterilmez). */
+const NO_MEAL_DATA_MESSAGE =
+  "Henüz öğün verisi yok. Danışanlar mobil uygulamadan öğün işaretledikçe grafik oluşur.";
+
+/** Örnek veri: yalnız demo (mock) modunda, hiçbir danışanın öğün çizelgesinde işaret yokken gösterilir. */
 const ADHERENCE_SERIES = [
   { day: "1", value: 70 },
   { day: "2", value: 68 },
@@ -378,6 +471,24 @@ const AUTH_USER_KEY = "dp_auth_user";
 const AUTH_EXPIRES_KEY = "dp_auth_expires_at";
 const DEFAULT_DURATION_MIN = 30;
 
+const readSession = (key: string): string | null => {
+  try {
+    return typeof window === "undefined" ? null : window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+
+const writeSession = (key: string, value: string | null): void => {
+  try {
+    if (typeof window === "undefined") return;
+    if (value === null) window.sessionStorage.removeItem(key);
+    else window.sessionStorage.setItem(key, value);
+  } catch {
+    // yoksay
+  }
+};
+
 const classNames = (...values: Array<string | false | null | undefined>) =>
   values.filter(Boolean).join(" ");
 
@@ -389,6 +500,22 @@ const formatMMSS = (totalSec: number) => {
 };
 
 /** localStorage ile senkronize state. SSR ve kota/erişim hatalarına karşı güvenli. */
+/** http modunda yalnızca istemci tercihi/taslağı olan anahtarlar kalıcı tutulur. */
+const CLIENT_PERSISTED_KEYS = new Set<string>([
+  "dp_ui",
+  "dp_plan_items",
+  "dp_plan_repeat",
+  "dp_plan_name",
+  "dp_plan_patient",
+  "dp_plan_notes",
+  "dp_plan_profile",
+  "dp_plan_activity",
+  "dp_plan_goal",
+  "dp_plan_macros"
+]);
+
+const shouldPersistKey = (key: string): boolean => !IS_HTTP || CLIENT_PERSISTED_KEYS.has(key);
+
 function usePersistentState<T>(
   key: string,
   initial: T | (() => T),
@@ -396,7 +523,7 @@ function usePersistentState<T>(
 ): [T, React.Dispatch<React.SetStateAction<T>>] {
   const { debounceMs = 300, onError } = options ?? {};
   const [state, setState] = React.useState<T>(() => {
-    if (typeof window !== "undefined") {
+    if (typeof window !== "undefined" && shouldPersistKey(key)) {
       try {
         const raw = localStorage.getItem(key);
         if (raw !== null) {
@@ -415,6 +542,10 @@ function usePersistentState<T>(
   const flush = React.useCallback(() => {
     if (pendingRef.current === null) return;
     if (typeof window === "undefined") return;
+    if (!shouldPersistKey(key)) {
+      pendingRef.current = null;
+      return;
+    }
     try {
       localStorage.setItem(key, JSON.stringify(pendingRef.current));
       pendingRef.current = null;
@@ -566,6 +697,11 @@ const getAuthFromStorage = (): AuthSnapshot => {
   if (typeof window === "undefined") {
     return { token: null, user: null, expiresAt: 0 };
   }
+  if (IS_HTTP) {
+    const expiresAt = Number(readSession(IDLE_EXPIRES_STORAGE_KEY) || 0);
+    const user = getStoredUser();
+    return { token: expiresAt > 0 ? "session" : null, user, expiresAt };
+  }
 
   return {
     token: localStorage.getItem(AUTH_TOKEN_KEY),
@@ -575,12 +711,22 @@ const getAuthFromStorage = (): AuthSnapshot => {
 };
 
 const setAuthToStorage = ({ token, user, expiresAt }: AuthSnapshot) => {
+  if (IS_HTTP) {
+    writeSession(IDLE_EXPIRES_STORAGE_KEY, String(expiresAt ?? 0));
+    return;
+  }
   localStorage.setItem(AUTH_TOKEN_KEY, token ?? "");
   localStorage.setItem(AUTH_USER_KEY, user ?? "");
   localStorage.setItem(AUTH_EXPIRES_KEY, String(expiresAt ?? 0));
 };
 
 const clearAuthStorage = () => {
+  if (IS_HTTP) {
+    clearApiTokens();
+    writeSession(IDLE_EXPIRES_STORAGE_KEY, null);
+    writeSession("nutricare.session_user", null);
+    return;
+  }
   localStorage.removeItem(AUTH_TOKEN_KEY);
   localStorage.removeItem(AUTH_USER_KEY);
   localStorage.removeItem(AUTH_EXPIRES_KEY);
@@ -729,8 +875,8 @@ const PatientRow: React.FC<{ patient: Patient; onOpen: (patient: Patient) => voi
     </td>
     <td>
       <div className="table-progress-cell">
-        <Progress value={patient.compliance} />
-        <span className="table-progress-value">%{patient.compliance}</span>
+        <Progress value={asNumber(patient.compliance)} />
+        <span className="table-progress-value">{patient.compliance === null ? "—" : `%${patient.compliance}`}</span>
       </div>
     </td>
     <td>{patient.lastAction}</td>
@@ -783,8 +929,8 @@ const PatientCard: React.FC<{
     <div>
       <label className="label">Uyum</label>
       <div className="patient-card-progress">
-        <Progress value={patient.compliance} />
-        <span className="table-progress-value">%{patient.compliance}</span>
+        <Progress value={asNumber(patient.compliance)} />
+        <span className="table-progress-value">{patient.compliance === null ? "—" : `%${patient.compliance}`}</span>
       </div>
     </div>
     <div className="card-actions">
@@ -799,16 +945,6 @@ const PatientCard: React.FC<{
     </div>
   </div>
 );
-
-type PatientDraft = {
-  name: string;
-  plan: string;
-  startDate: string;
-  endDate: string;
-  compliance: number;
-  status: PatientStatus;
-  package?: PatientPackage;
-};
 
 /** Paket satırı özet metni: "Paket adı · kalan X seans · Y gün (bitiş)". */
 const packageSummary = (pkg: PatientPackage, now: number = Date.now()): string => {
@@ -837,7 +973,7 @@ const PatientFormModal: React.FC<{
     plan: initial?.plan ?? "",
     startDate: initial?.startDate ?? today,
     endDate: initial?.endDate ?? "",
-    compliance: initial ? String(initial.compliance) : "0",
+    compliance: initial && initial.compliance !== null ? String(initial.compliance) : "",
     status: (initial?.status ?? "Aktif") as PatientStatus,
     pkgName: initial?.package?.name ?? "",
     pkgTotal: initial?.package ? String(initial.package.sessionsTotal) : "8",
@@ -857,7 +993,7 @@ const PatientFormModal: React.FC<{
   const errors = {
     name: values.name.trim() === "" ? "Ad zorunludur." : "",
     compliance:
-      values.compliance === "" || Number.isNaN(complianceNum) || complianceNum < 0 || complianceNum > 100
+      values.compliance !== "" && (Number.isNaN(complianceNum) || complianceNum < 0 || complianceNum > 100)
         ? "0–100 arası bir değer girin."
         : "",
     endDate:
@@ -890,7 +1026,7 @@ const PatientFormModal: React.FC<{
       plan: values.plan.trim() || "Plan atanmadı",
       startDate: values.startDate,
       endDate: values.endDate,
-      compliance: Math.round(complianceNum),
+      compliance: values.compliance.trim() === "" ? undefined : Math.round(complianceNum),
       status: values.status,
       package:
         values.pkgName.trim() !== "" && values.pkgEnd.trim() !== ""
@@ -994,11 +1130,14 @@ const GRID_MEALS: Array<{ label: string; short: string }> = [
 ];
 
 /** [gün][öğün] → tamamlandı mı */
-type MealGridState = boolean[][];
-
 const emptyMealGrid = (): MealGridState => Array.from({ length: PLAN_DAYS }, () => GRID_MEALS.map(() => false));
 
 const readMealGrid = (patientId: number): MealGridState => {
+  if (IS_HTTP) {
+    const patient = cache.patients.find((item) => item.id === patientId);
+    const key = `${patientId}:${patient?.startDate ?? ""}`;
+    return cache.mealGrids[key] ?? emptyMealGrid();
+  }
   try {
     const raw = localStorage.getItem(mealGridKey(patientId));
     const parsed: unknown = raw ? JSON.parse(raw) : null;
@@ -1014,6 +1153,14 @@ const readMealGrid = (patientId: number): MealGridState => {
 };
 
 const writeMealGrid = (patientId: number, grid: MealGridState): void => {
+  if (IS_HTTP) {
+    const patient = cache.patients.find((item) => item.id === patientId);
+    cache.mealGrids[`${patientId}:${patient?.startDate ?? ""}`] = grid;
+    if (patient) {
+      void trackingApi.ogunKaydet(patientId, patient.startDate, grid).catch(() => undefined);
+    }
+    return;
+  }
   try {
     localStorage.setItem(mealGridKey(patientId), JSON.stringify(grid));
   } catch {
@@ -1195,29 +1342,48 @@ const validateMeasurementForm = (values: MeasurementFormValues): MeasurementForm
     }
   };
 
-  checkNumber("weightKg", "Kilo (kg)", 30, 300);
-  checkNumber("heightCm", "Boy (cm)", 100, 250);
-  checkNumber("bodyFatPercentage", "Vücut yağ oranı (%)", 3, 75);
-  checkNumber("muscleMassKg", "Kas kütlesi (kg)", 10, 150);
-  checkNumber("waistCm", "Bel çevresi (cm)", 40, 200);
-  checkNumber("hipCm", "Kalça çevresi (cm)", 40, 200);
+  // Ölçüm alanları isteğe bağlı ("veri yok ≠ 0"); en az biri dolu olmalı.
+  checkNumber("weightKg", "Kilo (kg)", 30, 300, false);
+  checkNumber("heightCm", "Boy (cm)", 100, 250, false);
+  checkNumber("bodyFatPercentage", "Vücut yağ oranı (%)", 3, 75, false);
+  checkNumber("muscleMassKg", "Kas kütlesi (kg)", 10, 150, false);
+  checkNumber("waistCm", "Bel çevresi (cm)", 40, 200, false);
+  checkNumber("hipCm", "Kalça çevresi (cm)", 40, 200, false);
 
   if (values.notes && values.notes.length > 280) {
     errors.notes = "Not en fazla 280 karakter olabilir.";
   }
 
+  const numericKeys: Array<keyof MeasurementFormValues> = [
+    "weightKg",
+    "heightCm",
+    "bodyFatPercentage",
+    "muscleMassKg",
+    "waistCm",
+    "hipCm"
+  ];
+  if (numericKeys.every((key) => values[key].trim() === "")) {
+    errors.weightKg = "En az bir ölçüm değeri girin.";
+  }
+
   return errors;
+};
+
+/** Boş alan `null` (veri yok), dolu alan sayı. `Number("")` 0 verdiği için doğrudan kullanılmaz. */
+const toNumberOrNull = (raw: string): number | null => {
+  const trimmed = raw.trim();
+  return trimmed === "" ? null : Number(trimmed.replace(",", "."));
 };
 
 const toMeasurement = (values: MeasurementFormValues): Measurement => ({
   id: `m-${Date.now()}`,
   date: values.date,
-  weightKg: Number(values.weightKg.replace(",", ".")),
-  heightCm: Number(values.heightCm.replace(",", ".")),
-  bodyFatPercentage: Number(values.bodyFatPercentage.replace(",", ".")),
-  muscleMassKg: Number(values.muscleMassKg.replace(",", ".")),
-  waistCm: Number(values.waistCm.replace(",", ".")),
-  hipCm: Number(values.hipCm.replace(",", ".")),
+  weightKg: toNumberOrNull(values.weightKg),
+  heightCm: toNumberOrNull(values.heightCm),
+  bodyFatPercentage: toNumberOrNull(values.bodyFatPercentage),
+  muscleMassKg: toNumberOrNull(values.muscleMassKg),
+  waistCm: toNumberOrNull(values.waistCm),
+  hipCm: toNumberOrNull(values.hipCm),
   notes: values.notes.trim()
 });
 
@@ -1235,31 +1401,13 @@ const MeasurementDeltaCard: React.FC<{ current?: Measurement; previous?: Measure
   }
 
   const deltas = [
-    {
-      label: "Kilo",
-      text: formatDelta(current.weightKg, previous.weightKg, "kg"),
-      value: current.weightKg - previous.weightKg,
-      invert: false
-    },
-    {
-      label: "Yağ Oranı",
-      text: formatDelta(current.bodyFatPercentage, previous.bodyFatPercentage, "% yağ"),
-      value: current.bodyFatPercentage - previous.bodyFatPercentage,
-      invert: false
-    },
-    {
-      label: "Kas",
-      text: formatDelta(current.muscleMassKg, previous.muscleMassKg, "kg kas"),
-      value: current.muscleMassKg - previous.muscleMassKg,
-      invert: true
-    },
-    {
-      label: "Bel",
-      text: formatDelta(current.waistCm, previous.waistCm, "cm"),
-      value: current.waistCm - previous.waistCm,
-      invert: false
-    }
-  ];
+    { label: "Kilo", unit: "kg", invert: false, current: current.weightKg, previous: previous.weightKg },
+    { label: "Yağ Oranı", unit: "% yağ", invert: false, current: current.bodyFatPercentage, previous: previous.bodyFatPercentage },
+    { label: "Kas", unit: "kg kas", invert: true, current: current.muscleMassKg, previous: previous.muscleMassKg },
+    { label: "Bel", unit: "cm", invert: false, current: current.waistCm, previous: previous.waistCm }
+  ]
+    .map((item) => ({ ...item, diff: numericDelta(item.current, item.previous) }))
+    .filter((item): item is typeof item & { diff: number } => item.diff !== null);
 
   return (
     <div className="card delta-card">
@@ -1268,8 +1416,8 @@ const MeasurementDeltaCard: React.FC<{ current?: Measurement; previous?: Measure
       </h3>
       <div className="delta-grid">
         {deltas.map((delta) => {
-          const isZero = Math.abs(delta.value) < 0.0001;
-          const isGood = isZero ? null : delta.invert ? delta.value > 0 : delta.value < 0;
+          const isZero = Math.abs(delta.diff) < 0.0001;
+          const isGood = isZero ? null : delta.invert ? delta.diff > 0 : delta.diff < 0;
           return (
             <div
               key={delta.label}
@@ -1279,7 +1427,9 @@ const MeasurementDeltaCard: React.FC<{ current?: Measurement; previous?: Measure
               )}
             >
               <span className="delta-label">{delta.label}</span>
-              <strong className="delta-value">{delta.text}</strong>
+              <strong className="delta-value">
+                {formatDelta(asNumber(delta.current), asNumber(delta.previous), delta.unit)}
+              </strong>
             </div>
           );
         })}
@@ -1376,12 +1526,12 @@ const MeasurementEntryModal: React.FC<{
     initial
       ? {
           date: initial.date,
-          weightKg: String(initial.weightKg),
-          heightCm: String(initial.heightCm),
-          bodyFatPercentage: String(initial.bodyFatPercentage),
-          muscleMassKg: String(initial.muscleMassKg),
-          waistCm: String(initial.waistCm),
-          hipCm: String(initial.hipCm),
+          weightKg: initial.weightKg === null ? "" : String(initial.weightKg),
+          heightCm: initial.heightCm === null ? "" : String(initial.heightCm),
+          bodyFatPercentage: initial.bodyFatPercentage === null ? "" : String(initial.bodyFatPercentage),
+          muscleMassKg: initial.muscleMassKg === null ? "" : String(initial.muscleMassKg),
+          waistCm: initial.waistCm === null ? "" : String(initial.waistCm),
+          hipCm: initial.hipCm === null ? "" : String(initial.hipCm),
           notes: initial.notes ?? ""
         }
       : {
@@ -1424,7 +1574,7 @@ const MeasurementEntryModal: React.FC<{
         <div className="modal-header">
           <div>
             <h3 className="modal-title" id="measurement-modal-title">{initial ? "Ölçümü Düzenle" : "Yeni Ölçüm Ekle"}</h3>
-            <p className="muted">Seans ölçümünü kaydedin. Tüm sayısal alanlar zorunludur.</p>
+            <p className="muted">Seans ölçümünü kaydedin. Tarih zorunlu; ölçüm alanlarından en az birini doldurun.</p>
           </div>
           <button className="btn btn-outline btn-small" onClick={onClose}>
             Kapat
@@ -1438,32 +1588,32 @@ const MeasurementEntryModal: React.FC<{
               {touched && errors.date ? <p className="field-error">{errors.date}</p> : null}
             </div>
             <div>
-              <label className="label" htmlFor="m-weight">Kilo (kg) *</label>
+              <label className="label" htmlFor="m-weight">Kilo (kg)</label>
               <input id="m-weight" type="number" step="0.1" min={30} max={300} className="input" placeholder="örn. 83.5" value={values.weightKg} onChange={setField("weightKg")} />
               {touched && errors.weightKg ? <p className="field-error">{errors.weightKg}</p> : null}
             </div>
             <div>
-              <label className="label" htmlFor="m-height">Boy (cm) *</label>
+              <label className="label" htmlFor="m-height">Boy (cm)</label>
               <input id="m-height" type="number" step="0.5" min={100} max={250} className="input" placeholder="örn. 178" value={values.heightCm} onChange={setField("heightCm")} />
               {touched && errors.heightCm ? <p className="field-error">{errors.heightCm}</p> : null}
             </div>
             <div>
-              <label className="label" htmlFor="m-fat">Vücut Yağ Oranı (%) *</label>
+              <label className="label" htmlFor="m-fat">Vücut Yağ Oranı (%)</label>
               <input id="m-fat" type="number" step="0.1" min={3} max={75} className="input" placeholder="örn. 24.6" value={values.bodyFatPercentage} onChange={setField("bodyFatPercentage")} />
               {touched && errors.bodyFatPercentage ? <p className="field-error">{errors.bodyFatPercentage}</p> : null}
             </div>
             <div>
-              <label className="label" htmlFor="m-muscle">Kas Kütlesi (kg) *</label>
+              <label className="label" htmlFor="m-muscle">Kas Kütlesi (kg)</label>
               <input id="m-muscle" type="number" step="0.1" min={10} max={150} className="input" placeholder="örn. 61.4" value={values.muscleMassKg} onChange={setField("muscleMassKg")} />
               {touched && errors.muscleMassKg ? <p className="field-error">{errors.muscleMassKg}</p> : null}
             </div>
             <div>
-              <label className="label" htmlFor="m-waist">Bel (cm) *</label>
+              <label className="label" htmlFor="m-waist">Bel (cm)</label>
               <input id="m-waist" type="number" step="0.5" min={40} max={200} className="input" placeholder="örn. 96.5" value={values.waistCm} onChange={setField("waistCm")} />
               {touched && errors.waistCm ? <p className="field-error">{errors.waistCm}</p> : null}
             </div>
             <div>
-              <label className="label" htmlFor="m-hip">Kalça (cm) *</label>
+              <label className="label" htmlFor="m-hip">Kalça (cm)</label>
               <input id="m-hip" type="number" step="0.5" min={40} max={200} className="input" placeholder="örn. 104" value={values.hipCm} onChange={setField("hipCm")} />
               {touched && errors.hipCm ? <p className="field-error">{errors.hipCm}</p> : null}
             </div>
@@ -1501,9 +1651,19 @@ const MeasurementEntryModal: React.FC<{
 };
 
 const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
+  const { showToast } = useToast();
   const [measurements, setMeasurements] = React.useState<Measurement[]>(() =>
     getInitialMeasurements(patient.id)
   );
+
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    return subscribeServerData(() => {
+      setMeasurements(getInitialMeasurements(patient.id));
+    });
+  }, [patient.id]);
   /** null: kapalı · "new": yeni ölçüm · Measurement: düzenlenen kayıt */
   const [modal, setModal] = React.useState<"new" | Measurement | null>(null);
 
@@ -1518,12 +1678,30 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
   );
   const latest = sorted.length > 0 ? sorted[sorted.length - 1] : undefined;
   const previous = sorted.length > 1 ? sorted[sorted.length - 2] : undefined;
-  const latestBMI = latest ? calculateBMI(latest.weightKg, latest.heightCm) : 0;
+  const latestBMI = latest ? calculateBMI(asNumber(latest.weightKg), asNumber(latest.heightCm)) : 0;
   const latestCategory = latestBMI ? getBMICategory(latestBMI) : null;
 
   /** Yeni ölçümü ekler; aynı kimlik varsa (düzenleme) yerine yazar. */
   const handleSave = React.useCallback(
     (measurement: Measurement) => {
+      if (IS_HTTP) {
+        const exists = measurements.some((item) => item.id === measurement.id);
+        const action = exists
+          ? measurementsApi.guncelle(measurement.id, measurement)
+          : measurementsApi.ekle(patient.id, measurement);
+        void action
+          .then((saved) => {
+            setMeasurements((prev) => {
+              const next = [...prev.filter((item) => item.id !== measurement.id && item.id !== saved.id), saved].sort(
+                (a, b) => a.date.localeCompare(b.date)
+              );
+              cache.measurements[patient.id] = next;
+              return next;
+            });
+          })
+          .catch((error: unknown) => showToast(errorMessage(error), "error"));
+        return;
+      }
       setMeasurements((prev) => {
         const next = [...prev.filter((m) => m.id !== measurement.id), measurement].sort((a, b) =>
           a.date.localeCompare(b.date)
@@ -1532,12 +1710,25 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
         return next;
       });
     },
-    [patient.id]
+    [measurements, patient.id, showToast]
   );
 
   const handleDelete = React.useCallback(
     (measurement: Measurement) => {
       if (!window.confirm(`${measurement.date} tarihli ölçüm silinsin mi?`)) {
+        return;
+      }
+      if (IS_HTTP) {
+        void measurementsApi
+          .sil(measurement.id)
+          .then(() => {
+            setMeasurements((prev) => {
+              const next = prev.filter((m) => m.id !== measurement.id);
+              cache.measurements[patient.id] = next;
+              return next;
+            });
+          })
+          .catch((error: unknown) => showToast(errorMessage(error), "error"));
         return;
       }
       setMeasurements((prev) => {
@@ -1546,7 +1737,7 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
         return next;
       });
     },
-    [patient.id]
+    [patient.id, showToast]
   );
 
   return (
@@ -1564,7 +1755,7 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
           {latest ? (
             <div className="bmi-badge">
               <span className="muted">VKİ</span>
-              <strong>{latestBMI}</strong>
+              <strong>{latestBMI ? latestBMI : "—"}</strong>
               {latestCategory ? <span className="badge">{latestCategory}</span> : null}
             </div>
           ) : null}
@@ -1600,19 +1791,19 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
               </thead>
               <tbody>
                 {[...sorted].reverse().map((m) => {
-                  const bmi = calculateBMI(m.weightKg, m.heightCm);
+                  const bmi = calculateBMI(asNumber(m.weightKg), asNumber(m.heightCm));
                   return (
                     <tr key={m.id}>
                       <td className="value-strong">{m.date}</td>
-                      <td>{m.weightKg.toFixed(1)} kg</td>
-                      <td>{m.heightCm} cm</td>
+                      <td>{formatMetric(m.weightKg, " kg")}</td>
+                      <td>{formatMetric(m.heightCm, " cm", 0)}</td>
                       <td>
-                        {bmi} <span className="muted">({getBMICategory(bmi)})</span>
+                        {bmi ? `${bmi} (${getBMICategory(bmi)})` : "—"}
                       </td>
-                      <td>%{m.bodyFatPercentage.toFixed(1)}</td>
-                      <td>{m.muscleMassKg.toFixed(1)} kg</td>
-                      <td>{m.waistCm} cm</td>
-                      <td>{m.hipCm} cm</td>
+                      <td>{formatMetric(m.bodyFatPercentage, "", 1).replace(/^([\d.]+)$/, "%$1")}</td>
+                      <td>{formatMetric(m.muscleMassKg, " kg")}</td>
+                      <td>{formatMetric(m.waistCm, " cm", 0)}</td>
+                      <td>{formatMetric(m.hipCm, " cm", 0)}</td>
                       <td className="muted">{m.notes || "—"}</td>
                       <td style={{ textAlign: "right" }}>
                         <div className="row-actions">
@@ -1635,7 +1826,7 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
 
       {modal ? (
         <MeasurementEntryModal
-          initialHeight={latest?.heightCm}
+          initialHeight={latest?.heightCm ?? undefined}
           initial={modal === "new" ? undefined : modal}
           onClose={() => setModal(null)}
           onSubmit={handleSave}
@@ -1780,7 +1971,7 @@ const PatientDetailDrawer: React.FC<{
         <div className="drawer-body">
           {drawerTab === "ozet" ? <DrawerSummary patient={patient} /> : null}
           {drawerTab === "zaman" ? (
-            <PatientTimeline key={patient.id} patientId={patient.id} measurements={getInitialMeasurements(patient.id)} />
+            <PatientTimeline key={patient.id} patientId={patient.id} measurements={toMeasurementLikes(getInitialMeasurements(patient.id))} />
           ) : null}
           {drawerTab === "plan" ? (
             <DrawerPlanTab key={patient.id} patient={patient} patients={patients} onUpdatePatient={onUpdatePatient} />
@@ -1794,26 +1985,7 @@ const PatientDetailDrawer: React.FC<{
   );
 };
 
-type PlanItem = {
-  id: string;
-  label: string;
-  calories: number;
-  proteinG: number;
-  carbsG: number;
-  fatG: number;
-};
-
 /** Diyet planlayıcıda "Kaydet" ile danışana atanan plan (dp_patient_plans). */
-type SavedPatientPlan = {
-  templateName: string;
-  items: PlanItem[];
-  macros: MacroSplit;
-  notes: string;
-  repeat: { every: number; unit: string };
-  targetCalories: number;
-  savedAt: string;
-};
-
 const DEFAULT_PLAN_ITEMS: PlanItem[] = [
   { id: "k", label: "Kahvaltı: 1 haşlanmış yumurta + 2 dilim tam buğday + domates-salatalık", calories: 350, proteinG: 22, carbsG: 32, fatG: 14 },
   { id: "a1", label: "Ara 1: 1 fincan sade kahve + 1 küçük elma", calories: 120, proteinG: 3, carbsG: 24, fatG: 2 },
@@ -2012,10 +2184,23 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
   // Danışan değişince kayıtlı planını ve son ölçümünü yükle. İlk açılışta çalışmaz:
   // kaydedilmemiş taslak (dp_plan_*) korunur.
   const previousPatientId = React.useRef(patientId);
+  const [dataTick, setDataTick] = React.useState(0);
+
   React.useEffect(() => {
-    if (previousPatientId.current === patientId) {
+    if (!IS_HTTP) {
       return;
     }
+    return subscribeServerData(() => setDataTick((tick) => tick + 1));
+  }, []);
+
+  React.useEffect(() => {
+    if (IS_HTTP) {
+      void hydratePatient(patientId);
+    }
+  }, [patientId]);
+
+  React.useEffect(() => {
+    void dataTick;
     previousPatientId.current = patientId;
     setSavedMsg(null);
     const saved = readPatientRecord<SavedPatientPlan>(PATIENT_PLANS_KEY)[patientId];
@@ -2029,9 +2214,9 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
     const measurements = getInitialMeasurements(patientId);
     const latest = measurements[measurements.length - 1];
     if (latest) {
-      setProfile((prev) => ({ ...prev, weightKg: latest.weightKg, heightCm: latest.heightCm }));
+      setProfile((prev) => ({ ...prev, weightKg: latest.weightKg ?? prev.weightKg, heightCm: latest.heightCm ?? prev.heightCm }));
     }
-  }, [patientId, setItems, setTemplateName, setMacros, setNotes, setRepeat, setProfile]);
+  }, [patientId, dataTick, setItems, setTemplateName, setMacros, setNotes, setRepeat, setProfile]);
 
   const bmrFormula = clinic.nutrition.bmrFormula;
   const targets = React.useMemo(
@@ -2165,6 +2350,17 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
       targetCalories: targets.targetCalories,
       savedAt: new Date().toISOString()
     };
+    if (IS_HTTP) {
+      void plansApi
+        .kaydet(patient.id, plan)
+        .then((saved) => {
+          cache.plans[patient.id] = saved;
+          onUpdatePatient(patient.id, { plan: saved.templateName });
+          setSavedMsg(`"${saved.templateName}" ${patient.name} için kaydedildi.`);
+        })
+        .catch((error: unknown) => setSavedMsg(errorMessage(error)));
+      return;
+    }
     writePatientEntry(PATIENT_PLANS_KEY, patient.id, plan);
     onUpdatePatient(patient.id, { plan: name, lastAction: `Plan kaydedildi · ${new Date().toLocaleDateString("tr-TR")}` });
     setSavedMsg(`"${name}" ${patient.name} için kaydedildi.`);
@@ -2197,6 +2393,19 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
       targetCalories: targets.targetCalories,
       savedAt: new Date().toISOString()
     };
+    if (IS_HTTP) {
+      void plansApi
+        .kaydet(patient.id, plan)
+        .then((saved) => {
+          cache.plans[patient.id] = saved;
+          setTemplateName(name);
+          onUpdatePatient(patient.id, { plan: name });
+          setCopyOpen(false);
+          setSavedMsg(`"${name}" adıyla kopya oluşturuldu ve ${patient.name} için kaydedildi.`);
+        })
+        .catch((error: unknown) => setSavedMsg(errorMessage(error)));
+      return;
+    }
     writePatientEntry(PATIENT_PLANS_KEY, patient.id, plan);
     setTemplateName(name);
     onUpdatePatient(patient.id, { plan: name, lastAction: `Plan şablonu kopyalandı · ${new Date().toLocaleDateString("tr-TR")}` });
@@ -2491,16 +2700,18 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
 };
 
 const LoginScreen: React.FC<{
-  onLogin: (email: string, password: string) => void;
+  onLogin: (email: string, password: string) => Promise<void>;
   /** Tanıtım sayfasına dönüş. */
   onBack?: () => void;
 }> = ({ onLogin, onBack }) => {
-  // Demo giriş bilgileri ekranda hazır gelir; kullanıcı doğrudan "Giriş"e basabilir.
-  const [email, setEmail] = React.useState("demo@nutricare.com.tr");
-  const [password, setPassword] = React.useState("demo1234");
+  // Yerel geliştirmede backend seed hesabı hazır gelir; üretimde alanlar boş başlar.
+  const [email, setEmail] = React.useState(import.meta.env.DEV ? "dyt@test.nutricare" : "");
+  const [password, setPassword] = React.useState(import.meta.env.DEV ? "TestD-2026" : "");
+  const [error, setError] = React.useState<string | null>(null);
+  const [pending, setPending] = React.useState(false);
   const emailRef = React.useRef<HTMLInputElement>(null);
   const passwordRef = React.useRef<HTMLInputElement>(null);
-  const canSubmit = email.trim() !== "" && password.trim() !== "";
+  const canSubmit = email.trim() !== "" && password.trim() !== "" && !pending;
 
   // Tarayıcının autofill'i bazen React'in change olayını tetiklemez; DOM değerlerini
   // okuyup state'e yansıtarak "Giriş" butonunun autofill sonrası da etkinleşmesini sağla.
@@ -2521,9 +2732,16 @@ const LoginScreen: React.FC<{
     event.preventDefault();
     const emailValue = emailRef.current?.value ?? email;
     const passwordValue = passwordRef.current?.value ?? password;
-    if (emailValue.trim() !== "" && passwordValue.trim() !== "") {
-      onLogin(emailValue, passwordValue);
+    if (emailValue.trim() === "" || passwordValue.trim() === "" || pending) {
+      return;
     }
+    setError(null);
+    setPending(true);
+    void onLogin(emailValue, passwordValue)
+      .catch((loginError: unknown) => {
+        setError(errorMessage(loginError));
+      })
+      .finally(() => setPending(false));
   };
 
   return (
@@ -2560,12 +2778,18 @@ const LoginScreen: React.FC<{
               placeholder="••••••••"
             />
           </div>
+          {error ? (
+            <p className="field-error" role="alert">
+              {error}
+            </p>
+          ) : null}
           <button className="btn btn-primary" type="submit" disabled={!canSubmit}>
-            Giriş
+            {pending ? "Giriş yapılıyor…" : "Giriş"}
           </button>
           <p className="muted login-hint">
-            Demo giriş bilgileri hazır: <strong>demo@nutricare.com.tr</strong> / <strong>demo1234</strong>. Doğrudan
-            "Giriş"e basabilir veya herhangi bir e-posta/şifre yazabilirsiniz.
+            {import.meta.env.DEV
+              ? "Yerel test hesabı hazır: dyt@test.nutricare / TestD-2026."
+              : "Hesabınız yoksa kliniğinizden davet bağlantısı isteyin."}
           </p>
           {onBack ? (
             <button type="button" className="btn btn-link btn-small login-back" onClick={onBack}>
@@ -2576,20 +2800,6 @@ const LoginScreen: React.FC<{
       </div>
     </div>
   );
-};
-
-type AppointmentStatus = "Onaylı" | "Bekliyor";
-
-type Appointment = {
-  id: string;
-  /** Danışan kimliği; eski kayıtlarda yoksa ada göre eşleştirilir. */
-  patientId?: number;
-  /** Görünen ad (danışan adı değişince güncellenir). */
-  patient: string;
-  date: string; // ISO YYYY-MM-DD
-  time: string; // HH:MM
-  type: string;
-  status: AppointmentStatus;
 };
 
 const APPOINTMENT_TYPES = ["Kontrol / Ölçüm", "Online Görüşme", "Plan Revizyonu", "İlk Görüşme"];
@@ -2613,6 +2823,9 @@ const appendStoredAppointment = (draft: AppointmentDraft): void => {
   if (typeof window === "undefined") {
     return;
   }
+  if (IS_HTTP) {
+    return;
+  }
   try {
     const next: Appointment[] = [...readStoredAppointments(), { ...draft, id: `appt-${Date.now()}` }];
     localStorage.setItem(APPOINTMENTS_STORAGE_KEY, JSON.stringify(next));
@@ -2623,6 +2836,9 @@ const appendStoredAppointment = (draft: AppointmentDraft): void => {
 
 /** Dashboard özeti için randevuları salt-okunur okur; yoksa/bozuksa çekirdek veriye düşer. */
 const readStoredAppointments = (): Appointment[] => {
+  if (IS_HTTP) {
+    return cache.appointments;
+  }
   if (typeof window === "undefined") {
     return SEED_APPOINTMENTS;
   }
@@ -2640,6 +2856,10 @@ const readStoredAppointments = (): Appointment[] => {
 
 /** Danışan adı değiştiğinde/silindiğinde kayıtlı randevuları günceller (yetim kayıt kalmasın). */
 const updateStoredAppointments = (update: (appointments: Appointment[]) => Appointment[]): void => {
+  if (IS_HTTP) {
+    cache.appointments = update(cache.appointments);
+    return;
+  }
   try {
     localStorage.setItem(APPOINTMENTS_STORAGE_KEY, JSON.stringify(update(readStoredAppointments())));
   } catch {
@@ -2676,7 +2896,7 @@ const Sidebar: React.FC<{
   collapsed: boolean;
   onToggle: () => void;
   riskCount: number;
-  avgCompliance: number;
+  avgCompliance: number | null;
   patientCount: number;
 }> = ({ tab, onNavigate, collapsed, onToggle, riskCount, avgCompliance, patientCount }) => (
   <aside className={classNames("sidebar", collapsed && "sidebar-collapsed")}>
@@ -2718,7 +2938,7 @@ const Sidebar: React.FC<{
         <div className="sidebar-wellness">
           <Activity size={16} />
           <div>
-            <strong>Ortalama Uyum %{avgCompliance}</strong>
+            <strong>Ortalama Uyum {avgCompliance === null ? "—" : `%${avgCompliance}`}</strong>
             <small>{patientCount} danışan · {riskCount} riskli</small>
           </div>
         </div>
@@ -2746,21 +2966,62 @@ const TopHeader: React.FC<{
   );
   const [showNotifications, setShowNotifications] = React.useState(false);
   const [showProfile, setShowProfile] = React.useState(false);
-  const [notifications, setNotifications] = usePersistentState<AppNotification[]>(
+  const [localNotifications, setLocalNotifications] = usePersistentState<AppNotification[]>(
     "dp_notifications",
-    SEED_NOTIFICATIONS,
+    IS_HTTP ? [] : SEED_NOTIFICATIONS,
     { onError: handleStorageError }
   );
+  const [, setNotificationTick] = React.useState(0);
   const headerRef = React.useRef<HTMLDivElement>(null);
   // Unvan Ayarlar > Profil'den; ayar kaydedildiğinde bir sonraki çizimde güncellenir.
   const profileTitle = loadSettings().profile.title.trim() || "Diyetisyen";
 
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    return subscribeServerData(() => setNotificationTick((tick) => tick + 1));
+  }, []);
+
+  const notifications: AppNotification[] = IS_HTTP
+    ? cache.notifications.map((item) => ({
+        ...item,
+        time: item.createdAt ? timeAgoTr(item.createdAt) : item.time
+      }))
+    : localNotifications;
+
+  const refreshNotifications = React.useCallback(async () => {
+    try {
+      const result = await notificationsApi.listele();
+      cache.notifications = result.items;
+      notifyServerData();
+    } catch (error) {
+      showToast(errorMessage(error), "error");
+    }
+  }, [showToast]);
+
   const dismissNotification = React.useCallback(
-    (id: string) => setNotifications((prev) => prev.filter((item) => item.id !== id)),
-    [setNotifications]
+    (id: string) => {
+      if (IS_HTTP) {
+        void notificationsApi.okundu(id).then(refreshNotifications).catch(
+          (error: unknown) => showToast(errorMessage(error), "error")
+        );
+        return;
+      }
+      setLocalNotifications((prev) => prev.filter((item) => item.id !== id));
+    },
+    [refreshNotifications, setLocalNotifications, showToast]
   );
 
-  const clearNotifications = React.useCallback(() => setNotifications([]), [setNotifications]);
+  const clearNotifications = React.useCallback(() => {
+    if (IS_HTTP) {
+      void notificationsApi.temizle().then(refreshNotifications).catch(
+        (error: unknown) => showToast(errorMessage(error), "error")
+      );
+      return;
+    }
+    setLocalNotifications([]);
+  }, [refreshNotifications, setLocalNotifications, showToast]);
 
   React.useEffect(() => {
     const handleClick = (event: MouseEvent) => {
@@ -2896,8 +3157,6 @@ const TopHeader: React.FC<{
     </header>
   );
 };
-
-type AppointmentDraft = Omit<Appointment, "id">;
 
 const DAY_NAMES_TR = ["Pazar", "Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi"];
 
@@ -3076,11 +3335,61 @@ const AppointmentsView: React.FC<{
     (error: Error) => showToast(error.message, "error"),
     [showToast]
   );
-  const [appointments, setAppointments] = usePersistentState<Appointment[]>(APPOINTMENTS_STORAGE_KEY, SEED_APPOINTMENTS, { onError: handleStorageError });
+  const [appointments, setAppointments] = usePersistentState<Appointment[]>(
+    APPOINTMENTS_STORAGE_KEY,
+    IS_HTTP ? cache.appointments : SEED_APPOINTMENTS,
+    { onError: handleStorageError }
+  );
+
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    return subscribeServerData(() => setAppointments([...cache.appointments]));
+  }, [setAppointments]);
   const [modalOpen, setModalOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Appointment | null>(null);
   const [apptToDelete, setApptToDelete] = React.useState<Appointment | null>(null);
   const [summaryAppt, setSummaryAppt] = React.useState<Appointment | null>(null);
+  const [requests, setRequests] = React.useState<AppointmentRequest[]>([]);
+  const [requestsError, setRequestsError] = React.useState<string | null>(null);
+
+  const refreshRequests = React.useCallback(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    void appointmentsApi
+      .talepler("bekliyor")
+      .then((list) => {
+        setRequests(list);
+        setRequestsError(null);
+      })
+      .catch((error: unknown) => setRequestsError(errorMessage(error)));
+  }, []);
+
+  React.useEffect(() => {
+    refreshRequests();
+  }, [refreshRequests]);
+
+  const approveRequest = (id: string) => {
+    void appointmentsApi
+      .talepOnayla(id)
+      .then(() => appointmentsApi.listele(isoDaysAgo(365), isoDaysAhead(365)))
+      .then((list) => {
+        cache.appointments = list;
+        setAppointments([...list]);
+        refreshRequests();
+        showToast("Randevu talebi onaylandı.", "success");
+      })
+      .catch((error: unknown) => showToast(errorMessage(error), "error"));
+  };
+
+  const rejectRequest = (id: string) => {
+    void appointmentsApi
+      .talepReddet(id)
+      .then(refreshRequests)
+      .catch((error: unknown) => showToast(errorMessage(error), "error"));
+  };
 
   // Eski (yalnızca ad tutan) kayıtlara danışan kimliğini bir kez ekle.
   React.useEffect(() => {
@@ -3128,6 +3437,26 @@ const AppointmentsView: React.FC<{
   };
 
   const handleSubmit = (draft: AppointmentDraft) => {
+    if (IS_HTTP) {
+      const action = editing
+        ? appointmentsApi.guncelle(editing.id, {
+            patientId: draft.patientId,
+            patient: draft.patient,
+            date: draft.date,
+            time: draft.time,
+            type: draft.type,
+            status: draft.status
+          })
+        : appointmentsApi.ekle(draft);
+      void action
+        .then(() => appointmentsApi.listele(isoDaysAgo(365), isoDaysAhead(365)))
+        .then((list) => {
+          cache.appointments = list;
+          setAppointments([...list]);
+        })
+        .catch((error: unknown) => showToast(errorMessage(error), "error"));
+      return;
+    }
     setAppointments((prev) =>
       editing
         ? prev.map((appt) => (appt.id === editing.id ? { ...editing, ...draft } : appt))
@@ -3150,6 +3479,18 @@ const AppointmentsView: React.FC<{
     if (!apptToDelete) {
       return;
     }
+    if (IS_HTTP) {
+      void appointmentsApi
+        .sil(apptToDelete.id)
+        .then(() => appointmentsApi.listele(isoDaysAgo(365), isoDaysAhead(365)))
+        .then((list) => {
+          cache.appointments = list;
+          setAppointments([...list]);
+        })
+        .catch((error: unknown) => showToast(errorMessage(error), "error"))
+        .finally(() => setApptToDelete(null));
+      return;
+    }
     setAppointments((prev) => prev.filter((item) => item.id !== apptToDelete.id));
     setApptToDelete(null);
   };
@@ -3164,6 +3505,37 @@ const AppointmentsView: React.FC<{
           <Plus size={14} /> Yeni Randevu
         </button>
       </div>
+      {IS_HTTP ? (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card-head">
+            <h3>Gelen Randevu Talepleri</h3>
+            <span className="muted">{requests.length} bekleyen</span>
+          </div>
+          {requestsError ? <p className="field-error">{requestsError}</p> : null}
+          {requests.length === 0 ? (
+            <p className="muted">Bekleyen randevu talebi yok.</p>
+          ) : (
+            <ul className="scenario-list">
+              {requests.map((request) => (
+                <li key={request.id}>
+                  <span>
+                    <strong>{request.name}</strong> · {request.preferredDate} {request.preferredTime} · {request.phone}
+                    {request.note ? <span className="muted"> — {request.note}</span> : null}
+                  </span>
+                  <span className="row-actions">
+                    <button type="button" className="btn btn-primary btn-small" onClick={() => approveRequest(request.id)}>
+                      Onayla
+                    </button>
+                    <button type="button" className="btn btn-outline btn-small" onClick={() => rejectRequest(request.id)}>
+                      Reddet
+                    </button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
       {sorted.length === 0 ? (
         <p className="muted">
           {query.trim()
@@ -3263,16 +3635,42 @@ const AppointmentsView: React.FC<{
 };
 
 const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
+  const { showToast } = useToast();
   // Her çizimde güncel kayıt okunur; ölçüm sekmesindeki ekleme/düzenleme/silme hemen yansır.
   const measurements = getInitialMeasurements(patient.id);
   const latest = measurements.length > 0 ? measurements[measurements.length - 1] : undefined;
   const previous = measurements.length > 1 ? measurements[measurements.length - 2] : undefined;
-  const bmi = latest ? calculateBMI(latest.weightKg, latest.heightCm) : 0;
+  const bmi = latest ? calculateBMI(asNumber(latest.weightKg), asNumber(latest.heightCm)) : 0;
 
-  const requestLink = buildAppointmentRequestUrl(patient.id);
+  const [serverLink, setServerLink] = React.useState<string | null>(null);
+  const [linkBusy, setLinkBusy] = React.useState(false);
+  const [inviteToken, setInviteToken] = React.useState<string | null>(null);
+  const [inviteBusy, setInviteBusy] = React.useState(false);
+  const requestLink = IS_HTTP ? (serverLink ?? "") : buildAppointmentRequestUrl(patient.id);
   const [copied, setCopied] = React.useState(false);
 
+  const createInvite = () => {
+    setInviteBusy(true);
+    void patientsApi
+      .davet(patient.id)
+      .then((result) => setInviteToken(result.davetToken))
+      .catch((error: unknown) => showToast(errorMessage(error), "error"))
+      .finally(() => setInviteBusy(false));
+  };
+
+  const createLink = () => {
+    setLinkBusy(true);
+    void appointmentsApi
+      .linkOlustur(patient.id)
+      .then((result) => setServerLink(result.url))
+      .catch((error: unknown) => showToast(errorMessage(error), "error"))
+      .finally(() => setLinkBusy(false));
+  };
+
   const copyRequestLink = async () => {
+    if (!requestLink) {
+      return;
+    }
     try {
       await navigator.clipboard.writeText(requestLink);
       setCopied(true);
@@ -3297,35 +3695,37 @@ const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
         </div>
         <div className="hero-compliance">
           <span className="muted">Uyum</span>
-          <strong>%{patient.compliance}</strong>
-          <Progress value={patient.compliance} />
+          <strong>{patient.compliance === null ? "—" : `%${patient.compliance}`}</strong>
+          <Progress value={asNumber(patient.compliance ?? null)} />
         </div>
       </div>
       <div className="grid grid-3">
         <div className="card mini-stat">
           <span className="stat-icon stat-emerald"><Scale size={16} /></span>
           <small className="muted">Son Kilo</small>
-          <strong>{latest ? `${latest.weightKg.toFixed(1)} kg` : "—"}</strong>
-          {latest && previous ? (
-            <small className={latest.weightKg <= previous.weightKg ? "text-good" : "text-bad"}>
-              {formatDelta(latest.weightKg, previous.weightKg, "kg")}
+          <strong>{latest ? formatMetric(latest.weightKg, " kg") : "—"}</strong>
+          {latest && previous && numericDelta(latest.weightKg, previous.weightKg) !== null ? (
+            <small className={asNumber(latest.weightKg) <= asNumber(previous.weightKg) ? "text-good" : "text-bad"}>
+              {formatDelta(asNumber(latest.weightKg), asNumber(previous.weightKg), "kg")}
             </small>
           ) : null}
         </div>
         <div className="card mini-stat">
           <span className="stat-icon stat-mint"><Activity size={16} /></span>
           <small className="muted">Yağ Oranı</small>
-          <strong>{latest ? `%${latest.bodyFatPercentage.toFixed(1)}` : "—"}</strong>
-          {latest && previous ? (
-            <small className={latest.bodyFatPercentage <= previous.bodyFatPercentage ? "text-good" : "text-bad"}>
-              {formatDelta(latest.bodyFatPercentage, previous.bodyFatPercentage, "%")}
+          <strong>
+            {latest && latest.bodyFatPercentage !== null ? `%${formatMetric(latest.bodyFatPercentage, "", 1)}` : "—"}
+          </strong>
+          {latest && previous && numericDelta(latest.bodyFatPercentage, previous.bodyFatPercentage) !== null ? (
+            <small className={asNumber(latest.bodyFatPercentage) <= asNumber(previous.bodyFatPercentage) ? "text-good" : "text-bad"}>
+              {formatDelta(asNumber(latest.bodyFatPercentage), asNumber(previous.bodyFatPercentage), "%")}
             </small>
           ) : null}
         </div>
         <div className="card mini-stat">
           <span className="stat-icon stat-amber"><Ruler size={16} /></span>
           <small className="muted">Bel / Kalça</small>
-          <strong>{latest ? `${latest.waistCm} / ${latest.hipCm} cm` : "—"}</strong>
+          <strong>{latest ? `${formatMetric(latest.waistCm, "", 0)} / ${formatMetric(latest.hipCm, "", 0)} cm` : "—"}</strong>
           <small className="muted">{latest ? latest.date : "ölçüm yok"}</small>
         </div>
       </div>
@@ -3340,10 +3740,45 @@ const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
           sayfasına <span className="badge badge-amber">Bekliyor</span> olarak düşer.
         </p>
         <div className="patient-link-row">
-          <code className="patient-link-code" title={requestLink}>{requestLink}</code>
-          <button type="button" className="btn btn-outline btn-small patient-link-copy" onClick={copyRequestLink}>
-            {copied ? "Kopyalandı ✓" : "Bağlantıyı Kopyala"}
-          </button>
+          {IS_HTTP && !serverLink ? (
+            <button type="button" className="btn btn-primary btn-small" onClick={createLink} disabled={linkBusy}>
+              {linkBusy ? "Oluşturuluyor…" : "Tek kullanımlık bağlantı oluştur"}
+            </button>
+          ) : (
+            <>
+              <code className="patient-link-code" title={requestLink}>{requestLink}</code>
+              <button type="button" className="btn btn-outline btn-small patient-link-copy" onClick={copyRequestLink}>
+                {copied ? "Kopyalandı ✓" : "Bağlantıyı Kopyala"}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+      <div className="card">
+        <h3><MessageSquare size={15} /> Mobil Davet</h3>
+        <p className="muted">
+          {patient.name} için tek kullanımlık davet anahtarı oluşturun. Danışan mobil uygulamada bu
+          anahtarla şifresini belirleyip giriş yapabilir.
+        </p>
+        <div className="patient-link-row">
+          {!IS_HTTP ? (
+            <p className="muted muted-tight">Davet anahtarı gerçek backend modunda oluşturulur.</p>
+          ) : inviteToken ? (
+            <>
+              <code className="patient-link-code" title={inviteToken}>{inviteToken}</code>
+              <button
+                type="button"
+                className="btn btn-outline btn-small"
+                onClick={() => void navigator.clipboard.writeText(inviteToken).catch(() => undefined)}
+              >
+                Kopyala
+              </button>
+            </>
+          ) : (
+            <button type="button" className="btn btn-primary btn-small" onClick={createInvite} disabled={inviteBusy}>
+              {inviteBusy ? "Oluşturuluyor…" : "Davet anahtarı oluştur"}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -3583,6 +4018,31 @@ const DrawerPlanTab: React.FC<{ patient: Patient; patients: Patient[]; onUpdateP
       writeMealGrid(patient.id, empty);
     }
     const endDate = addDaysIso(startDate, cycle);
+    if (IS_HTTP) {
+      const template = Object.values(readPatientRecord<SavedPatientPlan>(PATIENT_PLANS_KEY)).find(
+        (item) => item.templateName === planName
+      );
+      const plan: SavedPatientPlan = {
+        templateName: planName,
+        items: template?.items ?? DEFAULT_PLAN_ITEMS,
+        macros: template?.macros ?? { carbsPct: 45, proteinPct: 30, fatPct: 25 },
+        notes: template?.notes ?? "",
+        repeat: { every: cycle, unit: "day" },
+        targetCalories: template?.targetCalories ?? 1800,
+        savedAt: new Date().toISOString(),
+        startDate,
+        endDate
+      };
+      void plansApi
+        .kaydet(patient.id, plan)
+        .then((saved) => {
+          cache.plans[patient.id] = saved;
+          onUpdatePatient(patient.id, { plan: planName, startDate, endDate });
+          setAssignMsg({ ok: true, text: `${planName} atandı: ${startDate} → ${endDate}` });
+        })
+        .catch((error: unknown) => setAssignMsg({ ok: false, text: errorMessage(error) }));
+      return;
+    }
     onUpdatePatient(patient.id, { plan: planName, startDate, endDate, lastAction: "Plan atandı" });
     setAssignMsg({ ok: true, text: `${planName} atandı: ${startDate} → ${endDate}` });
   };
@@ -3599,6 +4059,30 @@ const DrawerPlanTab: React.FC<{ patient: Patient; patients: Patient[]; onUpdateP
   const applyBulkAssign = (assignments: BulkAssignment[]) => {
     const baseItems = templatePlan && Array.isArray(templatePlan.items) ? templatePlan.items : DEFAULT_PLAN_ITEMS;
     const savedAt = new Date().toISOString();
+    if (IS_HTTP) {
+      void Promise.all(
+        assignments.map(async (assignment) => {
+          const plan: SavedPatientPlan = {
+            templateName: planName,
+            items: baseItems,
+            macros: assignment.macros,
+            notes: templatePlan?.notes ?? "",
+            repeat: templatePlan?.repeat ?? { every: 14, unit: "day" },
+            targetCalories: assignment.targetCalories,
+            savedAt
+          };
+          const saved = await plansApi.kaydet(assignment.patientId, plan);
+          cache.plans[assignment.patientId] = saved;
+          onUpdatePatient(assignment.patientId, { plan: planName });
+        })
+      )
+        .then(() => {
+          setBulkOpen(false);
+          setAssignMsg({ ok: true, text: `"${planName}" ${assignments.length} danışana atandı.` });
+        })
+        .catch((error: unknown) => setAssignMsg({ ok: false, text: errorMessage(error) }));
+      return;
+    }
     for (const assignment of assignments) {
       writePatientEntry<SavedPatientPlan>(PATIENT_PLANS_KEY, assignment.patientId, {
         templateName: planName,
@@ -3731,21 +4215,41 @@ const DrawerNotificationsTab: React.FC<{ patient: Patient }> = ({ patient }) => 
   });
   const [reminderMsg, setReminderMsg] = React.useState<{ ok: boolean; text: string } | null>(null);
 
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    return subscribeServerData(() => {
+      const saved = readPatientRecord<ReminderTimes>(PATIENT_REMINDERS_KEY)[patient.id] ?? {};
+      setTimes(
+        Object.fromEntries(
+          slots.map((slot) => [slot.id, typeof saved[slot.id] === "string" ? saved[slot.id] : slot.time])
+        )
+      );
+      const note = readPatientRecord<string>(PATIENT_NOTES_KEY)[patient.id];
+      setNotes(note ?? "");
+      setSaved(note !== undefined);
+    });
+  }, [patient.id, slots]);
+
   const storedNote = React.useMemo(() => readPatientRecord<string>(PATIENT_NOTES_KEY)[patient.id], [patient.id]);
   const [notes, setNotes] = React.useState(storedNote ?? "");
   const [saved, setSaved] = React.useState(storedNote !== undefined);
 
-  const alerts = React.useMemo(() => {
+  const alerts = (() => {
+    if (IS_HTTP) {
+      return cache.alerts.filter((alert) => alert.patientId === patient.id);
+    }
     const dismissed = new Set(loadDismissedIds());
     return buildAlerts(
       [{ id: patient.id, name: patient.name, plan: patient.plan, compliance: patient.compliance, status: patient.status, endDate: patient.endDate }],
-      getInitialMeasurements,
+      (patientId: number) => toMeasurementLikes(getInitialMeasurements(patientId)),
       loadAlertRules(rulesFromClinicSettings()),
       loadResolvedIds(),
       Date.now(),
       (patientId: number) => readMobileEvents().filter((event) => event.patientId === patientId)
     ).filter((alert) => !dismissed.has(alert.id));
-  }, [patient]);
+  })();
 
   const saveReminders = () => {
     const invalid = slots.find((slot) => !isValidTime(times[slot.id] ?? ""));
@@ -3753,11 +4257,27 @@ const DrawerNotificationsTab: React.FC<{ patient: Patient }> = ({ patient }) => 
       setReminderMsg({ ok: false, text: `${invalid.label} saati HH:MM formatında olmalı.` });
       return;
     }
+    if (IS_HTTP) {
+      void patientsApi
+        .hatirlatmaKaydet(patient.id, times)
+        .then(() => setReminderMsg({ ok: true, text: "Bildirim saatleri kaydedildi." }))
+        .catch((error: unknown) =>
+          setReminderMsg({ ok: false, text: errorMessage(error) })
+        );
+      return;
+    }
     writePatientEntry(PATIENT_REMINDERS_KEY, patient.id, times);
     setReminderMsg({ ok: true, text: "Bildirim saatleri kaydedildi." });
   };
 
   const saveNote = () => {
+    if (IS_HTTP) {
+      void patientsApi
+        .notKaydet(patient.id, notes.trim())
+        .then(() => setSaved(true))
+        .catch((error: unknown) => setReminderMsg({ ok: false, text: errorMessage(error) }));
+      return;
+    }
     writePatientEntry(PATIENT_NOTES_KEY, patient.id, notes.trim() ? notes : undefined);
     setSaved(true);
   };
@@ -3849,15 +4369,31 @@ const PatientPrivacyTab: React.FC<{ patient: Patient }> = ({ patient }) => {
   const [processedAt, setProcessedAt] = React.useState<number | null>(null);
   const [version, setVersion] = React.useState(0);
 
-  const events = React.useMemo(() => readMobileEvents(), [version]);
+  const events = React.useMemo(
+    () => (IS_HTTP ? (cache.eventsByPatient[patient.id] ?? []) : readMobileEvents()),
+    [version, patient.id]
+  );
   const patientEvents = events.filter((event) => event.patientId === patient.id);
   const consentEvent = latestConsentFor(events, patient.id);
-  const status = consentStatusOf(events, patient.id);
-  const scope = consentEvent ? (consentEvent.payload as ConsentPayload).scope : undefined;
+  const serverKvkk = IS_HTTP ? cache.consentByPatient[patient.id] : undefined;
+  const status = IS_HTTP ? (serverKvkk?.status ?? null) : consentStatusOf(events, patient.id);
+  const scope = IS_HTTP
+    ? serverKvkk?.scope
+    : consentEvent
+      ? (consentEvent.payload as ConsentPayload).scope
+      : undefined;
   const meta = consentChipMeta(status);
 
   /** Danışan adına silme talebi kaydı oluşturur; veriler onaya kadar korunur. */
   const createDeletionRequest = () => {
+    if (IS_HTTP) {
+      void consentApi
+        .silmeTalebi(patient.id)
+        .then(() => hydratePatient(patient.id))
+        .catch((error: unknown) => window.alert(errorMessage(error)));
+      setProcessedAt(null);
+      return;
+    }
     ingestMobileEvent({
       patientId: patient.id,
       type: "consent",
@@ -3873,6 +4409,20 @@ const PatientPrivacyTab: React.FC<{ patient: Patient }> = ({ patient }) => {
 
   /** Diyetisyen onayı sonrası veriler silinir ve "deleted" kaydı düşülür. */
   const processDeletion = () => {
+    if (IS_HTTP) {
+      const requestId = serverKvkk?.deletionRequest?.id;
+      if (!requestId) {
+        window.alert("Onaylanacak silme talebi bulunamadı.");
+        return;
+      }
+      void consentApi
+        .silmeOnayla(patient.id, requestId)
+        .then(() => hydratePatient(patient.id))
+        .catch((error: unknown) => window.alert(errorMessage(error)));
+      setProcessedAt(Date.now());
+      setConfirmOpen(false);
+      return;
+    }
     removePatientMobileEvents(patient.id);
     ingestMobileEvent({
       patientId: patient.id,
@@ -4000,7 +4550,7 @@ const App: React.FC = () => {
   );
 
   const [query, setQuery] = React.useState("");
-  const initialPatients = (import.meta.env.DEV ? DEMO_PATIENTS : []) as Patient[];
+  const initialPatients = (import.meta.env.DEV && !IS_HTTP ? DEMO_PATIENTS : []) as Patient[];
   const [patients, setPatients] = usePersistentState<Patient[]>("dp_patients", initialPatients, { onError: handleStorageError });
   const [selectedPatient, setSelectedPatient] = React.useState<Patient | null>(null);
   const [showDetail, setShowDetail] = React.useState(false);
@@ -4008,12 +4558,24 @@ const App: React.FC = () => {
   const [editingPatient, setEditingPatient] = React.useState<Patient | null>(null);
   const [patientToDelete, setPatientToDelete] = React.useState<Patient | null>(null);
 
-  const [auth, setAuth] = React.useState<AuthSnapshot>(() => getAuthFromStorage());
+  const [auth, setAuth] = React.useState<AuthSnapshot>(() =>
+    IS_HTTP
+      ? { token: null, user: getStoredUser(), expiresAt: 0 }
+      : getAuthFromStorage()
+  );
   const [isAuthed, setIsAuthed] = React.useState(() => {
+    if (IS_HTTP) {
+      return false;
+    }
     const snapshot = getAuthFromStorage();
     return Boolean(snapshot.token) && snapshot.expiresAt > Date.now();
   });
+  const [sessionChecking, setSessionChecking] = React.useState(IS_HTTP);
+  const [serverTick, setServerTick] = React.useState(0);
   const [remainingSec, setRemainingSec] = React.useState(() => {
+    if (IS_HTTP) {
+      return 0;
+    }
     const snapshot = getAuthFromStorage();
     return Math.max(0, Math.floor((snapshot.expiresAt - Date.now()) / 1000));
   });
@@ -4024,6 +4586,19 @@ const App: React.FC = () => {
    * danışan verisi (React state'i) sıfırlanır ve giriş ekranında görünür kalmaz.
    */
   const handleLogout = React.useCallback((clearLocalData = false) => {
+    if (IS_HTTP) {
+      void authApi.cikis().finally(() => {
+        resetServerCache();
+        setAuth({ token: null, user: null, expiresAt: 0 });
+        setIsAuthed(false);
+        setRemainingSec(0);
+        setPatients([]);
+        if (clearLocalData) {
+          clearSessionDataStorage();
+        }
+      });
+      return;
+    }
     clearAuthStorage();
     localStorage.removeItem("dp_auth_user_hash");
     if (clearLocalData) {
@@ -4035,6 +4610,64 @@ const App: React.FC = () => {
     // Bellekteki danışan verisi de silinsin diye sayfayı ana sayfadan yeniden yükle.
     window.history.replaceState(null, "", "#/");
     window.location.reload();
+  }, [setPatients]);
+
+  /** http modu: sayfa yenilendiğinde refresh token ile oturumu geri yükle. */
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      if (!hasRefreshToken()) {
+        setSessionChecking(false);
+        return;
+      }
+      const ok = await authApi.yenile();
+      if (cancelled) return;
+      if (!ok) {
+        setSessionChecking(false);
+        return;
+      }
+      const result = await bootstrapCore().catch(() => ({ patientsOk: false }));
+      if (cancelled) return;
+      if (result.patientsOk) {
+        setPatients([...cache.patients]);
+      }
+      const expiration = Date.now() + getIdleTimeoutMin() * 60 * 1000;
+      setAuth({
+        token: getAccessToken(),
+        user: getStoredUser(),
+        expiresAt: expiration
+      });
+      setAuthToStorage({ token: getAccessToken(), user: getStoredUser(), expiresAt: expiration });
+      setRemainingSec(getIdleTimeoutMin() * 60);
+      setIsAuthed(true);
+      setSessionChecking(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [setPatients]);
+
+  /** Sunucu önbelleği değiştiğinde ekranları yeniden çiz. */
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    return subscribeServerData(() => setServerTick((tick) => tick + 1));
+  }, []);
+
+  /** Token yenilenemediğinde oturumu kapat. */
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    return onSessionCleared(() => {
+      writeSession(IDLE_EXPIRES_STORAGE_KEY, null);
+      setIsAuthed(false);
+      setAuth({ token: null, user: null, expiresAt: 0 });
+    });
   }, []);
 
   const extendSession = React.useCallback(
@@ -4139,7 +4772,7 @@ const App: React.FC = () => {
       return patients;
     }
     return patients.filter((patient) => patient.name.toLowerCase().includes(lower));
-  }, [query, patients]);
+  }, [query, patients, serverTick]);
 
   const applySessionTimeout = React.useCallback(
     (minutes: number) => {
@@ -4164,6 +4797,23 @@ const App: React.FC = () => {
     if (!email || !password) {
       return;
     }
+    if (IS_HTTP) {
+      await authApi.giris(email, password);
+      const result = await bootstrapCore();
+      if (result.patientsOk) {
+        setPatients([...cache.patients]);
+      }
+      const expiration = Date.now() + getIdleTimeoutMin() * 60 * 1000;
+      setAuth({
+        token: getAccessToken(),
+        user: getStoredUser(),
+        expiresAt: expiration
+      });
+      setAuthToStorage({ token: getAccessToken(), user: getStoredUser(), expiresAt: expiration });
+      setIsAuthed(true);
+      setRemainingSec(getIdleTimeoutMin() * 60);
+      return;
+    }
     const expiration = Date.now() + getIdleTimeoutMin() * 60 * 1000;
     const next: AuthSnapshot = {
       token: "demo-token",
@@ -4174,18 +4824,20 @@ const App: React.FC = () => {
     setAuth(next);
     setIsAuthed(true);
     setRemainingSec(Math.floor((expiration - Date.now()) / 1000));
-    try {
-      const hash = await hashPassword(password);
-      localStorage.setItem("dp_auth_user_hash", hash);
-    } catch {
-      // hashleme başarısız olursa sessizce devam et
-    }
-  }, []);
+  }, [setPatients]);
 
-  const getMeasurements = React.useCallback((patientId: number) => getInitialMeasurements(patientId), []);
+  const getMeasurements = React.useCallback(
+    (patientId: number) => toMeasurementLikes(getInitialMeasurements(patientId)),
+    []
+  );
 
   const getMobileEvents = React.useCallback(
-    (patientId: number): MobileEvent[] => readMobileEvents().filter((event) => event.patientId === patientId),
+    (patientId: number): MobileEvent[] => {
+      if (IS_HTTP) {
+        return cache.eventsByPatient[patientId] ?? cache.activities.filter((event) => event.patientId === patientId);
+      }
+      return readMobileEvents().filter((event) => event.patientId === patientId);
+    },
     []
   );
 
@@ -4223,6 +4875,10 @@ const App: React.FC = () => {
 
   // Öncelik listesi her sekme açılışında güncel veriyle yeniden hesaplanır.
   const priorityEntries = React.useMemo(() => {
+    if (IS_HTTP) {
+      void serverTick;
+      return cache.priority;
+    }
     const rules = loadAlertRules(rulesFromClinicSettings());
     const dismissed = new Set(loadDismissedIds());
     const alerts = buildAlerts(
@@ -4234,12 +4890,18 @@ const App: React.FC = () => {
       getMobileEvents
     ).filter((alert) => !dismissed.has(alert.id));
     return buildPriorityList({ patients: enginePatients, getMobileEvents, getMeasurements, alerts, rules });
-  }, [enginePatients, getMeasurements, getMobileEvents, tab, mobileEventsVersion]);
+  }, [enginePatients, getMeasurements, getMobileEvents, tab, mobileEventsVersion, serverTick]);
 
-  const openDetail = React.useCallback((patient: Patient) => {
-    setSelectedPatient(patient);
-    setShowDetail(true);
-  }, []);
+  const openDetail = React.useCallback(
+    (patient: Patient) => {
+      setSelectedPatient(patient);
+      setShowDetail(true);
+      if (IS_HTTP && !isPatientLoaded(patient.id)) {
+        void hydratePatient(patient.id);
+      }
+    },
+    []
+  );
 
   const closeDetail = React.useCallback(() => {
     setShowDetail(false);
@@ -4257,6 +4919,35 @@ const App: React.FC = () => {
 
   const handleSavePatient = React.useCallback(
     (draft: PatientDraft) => {
+      if (IS_HTTP) {
+        void (async () => {
+          try {
+            if (editingPatient) {
+              const updated = await patientsApi.guncelle(editingPatient.id, {
+                name: draft.name,
+                plan: draft.plan,
+                startDate: draft.startDate,
+                endDate: draft.endDate,
+                compliance: draft.compliance,
+                status: draft.status,
+                ...(draft.package ? { package: draft.package } : {})
+              });
+              cache.patients = cache.patients.map((patient) =>
+                patient.id === updated.id ? updated : patient
+              );
+              setPatients([...cache.patients]);
+            } else {
+              const created = await patientsApi.ekle(draft);
+              cache.patients = [...cache.patients, created];
+              setPatients([...cache.patients]);
+            }
+            setServerTick((tick) => tick + 1);
+          } catch (error) {
+            showToast(errorMessage(error), "error");
+          }
+        })();
+        return;
+      }
       if (editingPatient && editingPatient.name !== draft.name) {
         const target = editingPatient;
         updateStoredAppointments((appointments) =>
@@ -4268,22 +4959,44 @@ const App: React.FC = () => {
       setPatients((prev) => {
         if (editingPatient) {
           return prev.map((patient) =>
-            patient.id === editingPatient.id ? { ...patient, ...draft, lastAction: "Az önce güncellendi" } : patient
+            patient.id === editingPatient.id
+              ? { ...patient, ...draft, compliance: draft.compliance ?? 0, lastAction: "Az önce güncellendi" }
+              : patient
           );
         }
         const nextId = prev.reduce((max, patient) => Math.max(max, patient.id), 0) + 1;
-        return [...prev, { ...draft, id: nextId, lastAction: "Az önce eklendi" }];
+        return [...prev, { ...draft, compliance: draft.compliance ?? 0, id: nextId, lastAction: "Az önce eklendi" }];
       });
     },
-    [editingPatient, setPatients]
+    [editingPatient, setPatients, showToast]
   );
 
-  /** Çekmece ve diyet planlayıcıdan gelen kısmi güncellemeler (plan ataması, uyum vb.). */
+  /** Çekmeceden/plandan gelen kısmi güncellemeler; http modunda sunucuya yazılır. */
   const handleUpdatePatient = React.useCallback(
     (patientId: number, patch: Partial<Omit<Patient, "id">>) => {
       setPatients((prev) => prev.map((patient) => (patient.id === patientId ? { ...patient, ...patch } : patient)));
+      if (IS_HTTP) {
+        const body: Partial<PatientDraft> = {};
+        if (patch.name !== undefined) body.name = patch.name;
+        if (patch.plan !== undefined) body.plan = patch.plan;
+        if (patch.startDate !== undefined) body.startDate = patch.startDate;
+        if (patch.endDate !== undefined) body.endDate = patch.endDate;
+        if (patch.status !== undefined) body.status = patch.status;
+        if (typeof patch.compliance === "number") body.compliance = patch.compliance;
+        if (patch.package !== undefined) body.package = patch.package;
+        if (Object.keys(body).length === 0) return;
+        void patientsApi
+          .guncelle(patientId, body)
+          .then((updated) => {
+            cache.patients = cache.patients.map((patient) =>
+              patient.id === updated.id ? updated : patient
+            );
+            setPatients([...cache.patients]);
+          })
+          .catch((error: unknown) => showToast(errorMessage(error), "error"));
+      }
     },
-    [setPatients]
+    [setPatients, showToast]
   );
 
   const handleAssignPlan = React.useCallback(
@@ -4307,6 +5020,20 @@ const App: React.FC = () => {
     if (!patient) {
       return;
     }
+    if (IS_HTTP) {
+      void patientsApi
+        .sil(patient.id)
+        .then(() => {
+          cache.patients = cache.patients.filter((item) => item.id !== patient.id);
+          setPatients([...cache.patients]);
+          if (selectedPatient?.id === patient.id) {
+            setShowDetail(false);
+          }
+          setPatientToDelete(null);
+        })
+        .catch((error: unknown) => showToast(errorMessage(error), "error"));
+      return;
+    }
     setPatients((prev) => prev.filter((item) => item.id !== patient.id));
     updateStoredAppointments((appointments) => appointments.filter((appt) => !isAppointmentOf(appt, patient)));
     removePatientLocalData(patient.id);
@@ -4314,7 +5041,7 @@ const App: React.FC = () => {
       setShowDetail(false);
     }
     setPatientToDelete(null);
-  }, [patientToDelete, setPatients, selectedPatient]);
+  }, [patientToDelete, setPatients, selectedPatient, showToast]);
 
   const handleImportData = React.useCallback(
     (raw: unknown): { ok: boolean; message: string } => {
@@ -4461,17 +5188,33 @@ const App: React.FC = () => {
 
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
   const [mobileNavOpen, setMobileNavOpen] = React.useState(false);
-  const riskCount = React.useMemo(() => patients.filter((p) => p.status === "Risk").length, [patients]);
+  const riskCount = React.useMemo(
+    () =>
+      IS_HTTP
+        ? (cache.dashboard?.stats.riskCount ?? patients.filter((p) => p.status === "Risk").length)
+        : patients.filter((p) => p.status === "Risk").length,
+    [patients, serverTick]
+  );
 
   const dashboardStats = React.useMemo(() => {
     const total = patients.length;
     const active = patients.filter((p) => p.status === "Aktif").length;
     const avgCompliance =
-      total > 0 ? Math.round(patients.reduce((sum, p) => sum + (p.compliance || 0), 0) / total) : 0;
+      total > 0 ? Math.round(patients.reduce((sum, p) => sum + (p.compliance ?? 0), 0) / total) : 0;
     const todayIso = new Date().toISOString().slice(0, 10);
-    const upcomingAppointments = readStoredAppointments().filter((appt) => appt.date >= todayIso).length;
+    const upcomingAppointments = (IS_HTTP ? cache.appointments : readStoredAppointments()).filter(
+      (appt) => appt.date >= todayIso
+    ).length;
+    if (IS_HTTP && cache.dashboard) {
+      return {
+        total,
+        active,
+        avgCompliance: cache.dashboard.stats.avgCompliance,
+        upcomingAppointments
+      };
+    }
     return { total, active, avgCompliance, upcomingAppointments };
-  }, [patients, tab]);
+  }, [patients, tab, serverTick]);
 
   // Çizelge işaretleri danışanın uyumunu da güncellediği için `patients` değişimi yeniden hesaplatır.
   const dashboardCharts = React.useMemo(() => buildDashboardCharts(patients), [patients, tab]);
@@ -4506,9 +5249,21 @@ const App: React.FC = () => {
 
   // Paylaşılan linkle danışanın kendi randevu talebini oluşturduğu herkese açık sayfa.
   if (routePath === "/randevu-talep") {
-    const params = new URLSearchParams(location.search);
+    // HashRouter'da sorgu bazen location.search'e değil hash'in içine düşer; iki kaynağı da oku.
+    const hashQuery = window.location.hash.includes("?") ? window.location.hash.split("?")[1] ?? "" : "";
+    const params = new URLSearchParams(location.search.replace(/^\?/, "") || hashQuery);
     return (
       <AppointmentRequestPage patientId={Number(params.get("d"))} token={params.get("k") ?? ""} />
+    );
+  }
+
+  if (sessionChecking) {
+    return (
+      <div className="login-wrapper">
+        <div className="card login-card">
+          <p className="muted">Oturum kontrol ediliyor…</p>
+        </div>
+      </div>
     );
   }
 
@@ -4605,7 +5360,7 @@ const App: React.FC = () => {
               />
               <div className="grid grid-md-4">
                 <StatCard title="Toplam Danışan" value={String(dashboardStats.total)} subtitle={`${dashboardStats.active} aktif · ${riskCount} riskli`} tone="emerald" icon={<Users size={18} />} />
-                <StatCard title="Ortalama Uyum" value={`%${dashboardStats.avgCompliance}`} subtitle="Tüm danışanlar" tone="mint" icon={<CheckCircle2 size={18} />} />
+                <StatCard title="Ortalama Uyum" value={dashboardStats.avgCompliance === null ? "—" : `%${dashboardStats.avgCompliance}`} subtitle="Tüm danışanlar" tone="mint" icon={<CheckCircle2 size={18} />} />
                 <StatCard title="Riskli Danışan" value={String(riskCount)} subtitle={riskCount > 0 ? "Takip gerekli" : "Risk yok"} tone="slate" icon={<TrendingDown size={18} />} />
                 <StatCard title="Yaklaşan Randevu" value={String(dashboardStats.upcomingAppointments)} subtitle="Bugün ve sonrası" tone="amber" icon={<CalendarDays size={18} />} />
               </div>
@@ -4619,7 +5374,9 @@ const App: React.FC = () => {
                   <div className="card-head">
                     <h3><Activity size={15} /> 7 Günlük Uyum Yüzdesi</h3>
                     {dashboardCharts.trackedPatients === 0 ? (
-                      <span className="badge badge-slate" title="Öğün çizelgesinde henüz işaret yok">Örnek veri</span>
+                      IS_HTTP ? null : (
+                        <span className="badge badge-slate" title="Öğün çizelgesinde henüz işaret yok">Örnek veri</span>
+                      )
                     ) : adherenceTrend !== null ? (
                       <span className={classNames("badge", adherenceTrend >= 0 ? "badge-emerald" : "badge-rose")}>
                         {adherenceTrend >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
@@ -4627,6 +5384,9 @@ const App: React.FC = () => {
                       </span>
                     ) : null}
                   </div>
+                  {IS_HTTP && dashboardCharts.trackedPatients === 0 ? (
+                    <p className="muted chart-empty">{NO_MEAL_DATA_MESSAGE}</p>
+                  ) : (
                   <div className="chart">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={dashboardCharts.adherence}>
@@ -4638,6 +5398,7 @@ const App: React.FC = () => {
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
+                  )}
                 </div>
 
                 <div className="card chart-card span-2">
@@ -4645,10 +5406,15 @@ const App: React.FC = () => {
                     <h3><UtensilsCrossed size={15} /> Öğün Tamamlama Dağılımı</h3>
                     <span className="muted">
                       {dashboardCharts.trackedPatients === 0
-                        ? "Örnek veri"
+                        ? IS_HTTP
+                          ? ""
+                          : "Örnek veri"
                         : `${dashboardCharts.trackedPatients} danışanın çizelgesi`}
                     </span>
                   </div>
+                  {IS_HTTP && dashboardCharts.trackedPatients === 0 ? (
+                    <p className="muted chart-empty">{NO_MEAL_DATA_MESSAGE}</p>
+                  ) : (
                   <div className="chart">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={dashboardCharts.meals}>
@@ -4660,6 +5426,7 @@ const App: React.FC = () => {
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
+                  )}
                 </div>
               </div>
 
@@ -4802,7 +5569,7 @@ const App: React.FC = () => {
         {reportPatient ? (
           <WeeklyReport
             patient={patients.find((patient) => patient.id === reportPatient.id) ?? reportPatient}
-            measurements={getInitialMeasurements(reportPatient.id)}
+            measurements={toMeasurementLikes(getInitialMeasurements(reportPatient.id))}
             onClose={() => setReportPatient(null)}
           />
         ) : null}

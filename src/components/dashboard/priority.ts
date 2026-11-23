@@ -66,9 +66,10 @@ export const buildPriorityList = (params: {
       }
     }
 
-    // 2) Uyum eşiğinin altında mı?
-    const gap = rules.complianceThreshold - patient.compliance;
-    if (gap > 0) {
+    // 2) Uyum eşiğinin altında mı? (veri yoksa null — risk sayılmaz)
+    const gap =
+      patient.compliance === null ? null : rules.complianceThreshold - patient.compliance;
+    if (gap !== null && gap > 0) {
       reasons.push({ label: `uyum %${patient.compliance}`, points: Math.min(gap, COMPLIANCE_CAP) });
     }
 

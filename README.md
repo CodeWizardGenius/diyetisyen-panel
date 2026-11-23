@@ -2,7 +2,25 @@
 
 Diyetisyenler için danışan takibi, ölçüm geçmişi, diyet planı oluşturma ve uyarı yönetimi sağlayan tek sayfalık (SPA) yönetim paneli. React + TypeScript + Vite ile geliştirilmiştir.
 
-> Not: Bu bir **demo**'dur. Başlangıç verileri statik mock'tur ve gerçek bir backend yoktur; giriş ekranı herhangi bir e-posta/şifre kombinasyonunu kabul eder. Oturum, danışanlar, randevular, ölçümler ve diyet planı düzenleyicisinin içeriği tarayıcının `localStorage`'ında saklanır (sayfa yenilense de korunur).
+> Veri kaynağı iki modludur: `VITE_API_MODE=http` gerçek `nutricare-backend` API'sine bağlanır; `VITE_API_MODE=mock` ise backend olmadan tarayıcı içi demo verisiyle çalışır. Ayrıntı ve taşınan anahtarlar: `docs/ENTEGRASYON-RAPORU.md`.
+
+## API modları
+
+| Mod | Davranış |
+|---|---|
+| `http` | Giriş/JWT, danışan, ölçüm, plan, randevu, uyarı, mesaj, bildirim ve ayarlar sunucudan gelir. Tarayıcıda danışan/klinik verisi tutulmaz; yalnız tema, UI ve plan taslağı gibi istemci tercihleri `localStorage`'da kalır. |
+| `mock` | Backend gerekmez; demo verisi `localStorage`'da tutulur. Geliştirme/demo içindir. |
+
+`.env.example` dosyasını `.env.local` olarak kopyalayın:
+
+```bash
+VITE_API_MODE=http
+VITE_API_BASE_URL=http://localhost:3000
+```
+
+Üretim derlemesi `VITE_API_MODE` verilmeden güvenli varsayılan olarak `mock` ile derlenir.
+`http` seçilip `VITE_API_BASE_URL` verilmezse derleme bilinçli olarak hata verir (sessizce mock'a düşmez).
+Gerçek API ile yayın için `VITE_API_MODE=http` ve `VITE_API_BASE_URL` birlikte verilmelidir.
 
 ## Özellikler
 
@@ -33,6 +51,10 @@ npm install      # bağımlılıkları yükle
 npm run dev      # geliştirme sunucusu (http://localhost:5173)
 ```
 
+Backend'i yerelde ayağa kaldırmak için `nutricare-backend` kökünde `docker compose up --build -d`
+çalıştırın (gateway `http://localhost:3000`, Swagger `http://localhost:3000/docs`). Test hesapları
+`dyt@test.nutricare` / `TestD-2026` yalnızca yerel seed içindir.
+
 ## Komutlar
 
 | Komut             | Açıklama                                               |
@@ -42,12 +64,27 @@ npm run dev      # geliştirme sunucusu (http://localhost:5173)
 | `npm run preview` | Üretim derlemesini yerelde önizler.                    |
 | `npm run deploy`  | `dist/` klasörünü GitHub Pages'e (`gh-pages`) atar.    |
 
+Üretim derlemesinde mod **açıkça** verilmelidir; verilmezse derleme hata verir:
+
+```bash
+VITE_API_MODE=mock npm run build                                            # demo (backend'siz)
+VITE_API_MODE=http VITE_API_BASE_URL=https://api.ornek.com npm run build     # gerçek API
+```
+
+> GitHub Pages yayını için repo ayarlarında `VITE_API_BASE_URL` değişkeni tanımlı olmalı
+> (Settings → Secrets and variables → Actions → Variables). Yoksa yayın derlemesi hata verir.
+
 ## Dağıtım (Deployment)
 
 Proje `diyetisyen-panel.com.tr` özel alan adıyla GitHub Pages üzerinde yayınlanır:
 
 - `main` dalına her push'ta `.github/workflows/deploy.yml` otomatik derleyip yayınlar.
-- Özel alan adı `public/CNAME` içinde tanımlıdır; SPA yönlendirmesi için build sonrası `index.html`, `404.html` olarak kopyalanır.
+- Derleme adımı `VITE_API_MODE` ve `VITE_API_BASE_URL` değerlerini repo değişkenlerinden
+  (`vars.VITE_API_MODE`, `vars.VITE_API_BASE_URL`) okur.
+- `public/CNAME` özel alan adını tanımlar; SPA yönlendirmesi için build sonrası `index.html`,
+  `404.html` olarak kopyalanır.
+- CSP (`connect-src`) ve `_headers` derleme zamanında API kökeninden üretilir; API adresi değişince
+  yeniden derleyin.
 
 ## Proje Yapısı
 

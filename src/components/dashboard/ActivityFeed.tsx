@@ -25,6 +25,7 @@ import {
 } from "../../types/mobileData";
 import { timeAgoTr } from "../alerts/alertEngine";
 import { classNames } from "../settings/classNames";
+import { IS_HTTP, cache, subscribeServerData } from "../../api";
 
 const FEED_LAST_READ_KEY = "dp_feed_last_read_at";
 const FEED_POLL_MS = 15000;
@@ -137,18 +138,24 @@ const readLastReadAt = (): number => {
 
 /** Dashboard'daki canlı veri akışı: son mobil veri girişleri + okunmamış sayacı. */
 export const ActivityFeed: React.FC<Props> = ({ patients, onOpenPatient }) => {
-  const [events, setEvents] = React.useState<MobileEvent[]>(() => sortMobileEventsDesc(readMobileEvents()));
+  const [events, setEvents] = React.useState<MobileEvent[]>(() =>
+    sortMobileEventsDesc(IS_HTTP ? cache.activities : readMobileEvents())
+  );
   const [lastReadAt, setLastReadAt] = React.useState<number>(() => readLastReadAt());
   const [scenario, setScenario] = React.useState<ScenarioKey>("aktif");
   const [simPatientId, setSimPatientId] = React.useState<number>(() => patients[0]?.id ?? 0);
   const [simMsg, setSimMsg] = React.useState<string | null>(null);
 
   const refresh = React.useCallback(() => {
-    setEvents(sortMobileEventsDesc(readMobileEvents()));
+    setEvents(sortMobileEventsDesc(IS_HTTP ? cache.activities : readMobileEvents()));
   }, []);
 
   // Yeni veri anında görünsün: panel içi değişiklik olayı + periyodik yoklama + sekmeler arası "storage" olayı.
   React.useEffect(() => {
+    if (IS_HTTP) {
+      refresh();
+      return subscribeServerData(refresh);
+    }
     const timer = window.setInterval(refresh, FEED_POLL_MS);
     window.addEventListener("storage", refresh);
     window.addEventListener(MOBILE_EVENTS_CHANGED, refresh);
@@ -210,39 +217,41 @@ export const ActivityFeed: React.FC<Props> = ({ patients, onOpenPatient }) => {
       </div>
       <p className="muted">Danışan mobil uygulamasından gelen son veri girişleri (en yeni üstte).</p>
 
-      <details className="feed-sim">
-        <summary>Demo veri üret (mobil veri simülasyonu)</summary>
-        <div className="feed-sim-row">
-          <select
-            className="input"
-            aria-label="Simülasyon danışanı"
-            value={simPatientId}
-            onChange={(event) => setSimPatientId(Number(event.target.value))}
-          >
-            {patients.map((patient) => (
-              <option key={patient.id} value={patient.id}>
-                {patient.name}
-              </option>
-            ))}
-          </select>
-          <select
-            className="input"
-            aria-label="Simülasyon senaryosu"
-            value={scenario}
-            onChange={(event) => setScenario(event.target.value as ScenarioKey)}
-          >
-            {SCENARIOS.map((item) => (
-              <option key={item.key} value={item.key}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-          <button type="button" className="btn btn-outline btn-small" onClick={inject}>
-            Ekle
-          </button>
-        </div>
-        {simMsg ? <p className="muted muted-tight">{simMsg}</p> : null}
-      </details>
+      {!IS_HTTP ? (
+        <details className="feed-sim">
+          <summary>Demo veri üret (mobil veri simülasyonu)</summary>
+          <div className="feed-sim-row">
+            <select
+              className="input"
+              aria-label="Simülasyon danışanı"
+              value={simPatientId}
+              onChange={(event) => setSimPatientId(Number(event.target.value))}
+            >
+              {patients.map((patient) => (
+                <option key={patient.id} value={patient.id}>
+                  {patient.name}
+                </option>
+              ))}
+            </select>
+            <select
+              className="input"
+              aria-label="Simülasyon senaryosu"
+              value={scenario}
+              onChange={(event) => setScenario(event.target.value as ScenarioKey)}
+            >
+              {SCENARIOS.map((item) => (
+                <option key={item.key} value={item.key}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="btn btn-outline btn-small" onClick={inject}>
+              Ekle
+            </button>
+          </div>
+          {simMsg ? <p className="muted muted-tight">{simMsg}</p> : null}
+        </details>
+      ) : null}
 
       {visible.length === 0 ? (
         <p className="muted">Henüz mobil veri yok. Danışanlar veri girdikçe burada görünecek.</p>

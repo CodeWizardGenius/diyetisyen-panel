@@ -21,7 +21,11 @@ export type Patient = {
   plan: string;
   startDate: string;
   endDate: string;
-  compliance: number;
+  compliance: number | null;
+  /** Sunucudan gelen elle girilmiş uyum; null ise hesaplanan kullanılır. */
+  complianceManual?: number | null;
+  /** Sunucuda hesaplanan uyum. */
+  complianceComputed?: number | null;
   lastAction: string;
   status: PatientStatus;
   /** Opsiyonel paket bilgisi; tanımlıysa paket bitişi uyarıları üretilir. */
@@ -69,7 +73,7 @@ export const DEMO_STATS = {
   avgCompliance:
     DEMO_PATIENTS.length > 0
       ? Math.round(
-          DEMO_PATIENTS.reduce((sum, patient) => sum + patient.compliance, 0) / DEMO_PATIENTS.length
+          DEMO_PATIENTS.reduce((sum, patient) => sum + (patient.compliance ?? 0), 0) / DEMO_PATIENTS.length
         )
       : 0
 };

@@ -15,7 +15,7 @@ export interface EnginePatient {
   id: number;
   name: string;
   plan: string;
-  compliance: number;
+  compliance: number | null;
   status: string;
   endDate: string;
   /** Paket takibi: tanımlıysa paket bitişi/ödeme uyarısı üretilir. */
@@ -39,9 +39,10 @@ const deriveAdherenceAlerts = (
   now: number
 ): PatientAlert[] =>
   patients
-    .filter((patient) => patient.compliance < rules.complianceThreshold)
+    .filter((patient) => patient.compliance !== null && patient.compliance < rules.complianceThreshold)
     .map((patient) => {
-      const gap = rules.complianceThreshold - patient.compliance;
+      const compliance = patient.compliance as number;
+      const gap = rules.complianceThreshold - compliance;
       return {
         id: `adh-${patient.id}`,
         patientId: patient.id,
@@ -49,7 +50,7 @@ const deriveAdherenceAlerts = (
         patientPlan: patient.plan,
         severity: gap >= 15 ? "critical" : "warning",
         category: "adherence",
-        title: `Uyum %${patient.compliance}'ye düştü`,
+        title: `Uyum %${compliance}'ye düştü`,
         description: `Eşik %${rules.complianceThreshold} — hedefin ${gap} puan altında. Plan gözden geçirilmeli.`,
         timestamp: minutesAgoIso(now, 25 + patient.id * 17),
         isResolved: false
@@ -99,7 +100,7 @@ const deriveMissedMealAlerts = (
   now: number
 ): PatientAlert[] =>
   patients
-    .filter((patient) => patient.status === "Risk" || patient.compliance < 60)
+    .filter((patient) => patient.status === "Risk" || (patient.compliance !== null && patient.compliance < 60))
     .map((patient) => ({
       id: `mm-${patient.id}`,
       patientId: patient.id,

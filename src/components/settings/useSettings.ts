@@ -6,6 +6,7 @@ import {
   saveSettings
 } from "../../types/settings";
 import { syncAlertRulesWithClinic } from "../../types/alerts";
+import { IS_HTTP, errorMessage, notifyServerData, settingsApi, subscribeServerData, cache } from "../../api";
 
 const clone = (value: ClinicSettings): ClinicSettings =>
   JSON.parse(JSON.stringify(value)) as ClinicSettings;
@@ -32,6 +33,17 @@ export const useSettings = (): UseSettingsResult => {
   const [toast, setToast] = React.useState<string | null>(null);
   const toastTimer = React.useRef<number | undefined>(undefined);
 
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    return subscribeServerData(() => {
+      const server = loadSettings();
+      setSettings(server);
+      setDraft(server);
+    });
+  }, []);
+
   React.useEffect(
     () => () => {
       window.clearTimeout(toastTimer.current);
@@ -56,6 +68,23 @@ export const useSettings = (): UseSettingsResult => {
 
   const save = React.useCallback(() => {
     const next = clone(draft);
+    if (IS_HTTP) {
+      void Promise.all([
+        settingsApi.profil(next.profile),
+        settingsApi.guvenlik(next.security),
+        settingsApi.beslenmeKaydet(next.nutrition),
+        settingsApi.bildirimlerKaydet(next.notifications),
+        settingsApi.calisma(next.schedule)
+      ])
+        .then(() => {
+          cache.settings = next;
+          setSettings(next);
+          notifyServerData();
+          showToast("Değişiklikler kaydedildi.");
+        })
+        .catch((error: unknown) => showToast(errorMessage(error)));
+      return;
+    }
     saveSettings(next);
     syncAlertRulesWithClinic(next.notifications);
     setSettings(next);
@@ -64,6 +93,24 @@ export const useSettings = (): UseSettingsResult => {
 
   const resetDefaults = React.useCallback(() => {
     const next = clone(DEFAULT_SETTINGS);
+    if (IS_HTTP) {
+      void Promise.all([
+        settingsApi.profil(next.profile),
+        settingsApi.guvenlik(next.security),
+        settingsApi.beslenmeKaydet(next.nutrition),
+        settingsApi.bildirimlerKaydet(next.notifications),
+        settingsApi.calisma(next.schedule)
+      ])
+        .then(() => {
+          cache.settings = next;
+          setSettings(next);
+          setDraft(next);
+          notifyServerData();
+          showToast("Ayarlar varsayılanlara sıfırlandı.");
+        })
+        .catch((error: unknown) => showToast(errorMessage(error)));
+      return;
+    }
     saveSettings(next);
     syncAlertRulesWithClinic(next.notifications);
     setSettings(next);

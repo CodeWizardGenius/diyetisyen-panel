@@ -1,5 +1,8 @@
 /** Klinik diyetisyen ayarları için merkezi tip tanımları ve kalıcı depolama yardımcıları. */
 
+import { cache } from "../api/cache";
+import { IS_HTTP } from "../api/config";
+
 export type BmrFormula = "mifflin" | "harris";
 
 export type SettingsSectionKey = "profil" | "beslenme" | "bildirim" | "calisma" | "guvenlik";
@@ -93,7 +96,7 @@ export interface SettingsPatient {
   id: number;
   name: string;
   plan: string;
-  compliance: number;
+  compliance: number | null;
   status: string;
   /** Yedekleme/geri yükleme için opsiyonel tam alanlar. */
   startDate?: string;
@@ -213,6 +216,9 @@ const mergeWithDefaults = (stored: Record<string, unknown>): ClinicSettings => (
 
 /** localStorage'dan ayarları okur; bozuk/eksik veride varsayılanlarla birleştirir. */
 export const loadSettings = (): ClinicSettings => {
+  if (IS_HTTP) {
+    return structuredCloneSafe(cache.settings ?? DEFAULT_SETTINGS);
+  }
   if (typeof window === "undefined") {
     return structuredCloneSafe(DEFAULT_SETTINGS);
   }
@@ -234,8 +240,12 @@ export const loadSettings = (): ClinicSettings => {
 const structuredCloneSafe = (value: ClinicSettings): ClinicSettings =>
   JSON.parse(JSON.stringify(value)) as ClinicSettings;
 
-/** Ayarları localStorage'a yazar. */
+/** Ayarları yazar. http modunda yalnız bellek önbelleğine yazar; API çağrısı çağıran katmanda yapılır. */
 export const saveSettings = (settings: ClinicSettings): void => {
+  if (IS_HTTP) {
+    cache.settings = structuredCloneSafe(settings);
+    return;
+  }
   if (typeof window === "undefined") {
     return;
   }

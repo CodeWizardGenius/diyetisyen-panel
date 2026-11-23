@@ -10,6 +10,7 @@ import {
 } from "../../types/mobileData";
 import { timeAgoTr } from "../alerts/alertEngine";
 import { classNames } from "../settings/classNames";
+import { IS_HTTP, errorMessage, messagesApi, notifyServerData, subscribeServerData } from "../../api";
 
 /** Hazır mesaj şablonları (FAZ 2 · madde 7). */
 export const MESSAGE_TEMPLATES = [
@@ -57,6 +58,7 @@ export const MessageComposer: React.FC<Props> = ({ patients, initialPatientId, o
   const [text, setText] = React.useState("");
   const [notice, setNotice] = React.useState<string | null>(null);
   const [version, setVersion] = React.useState(0);
+  const [serverMessages, setServerMessages] = React.useState<Array<{ id: string; text: string; direction: "patient" | "dietitian"; sentAt: string; readAt: string | null }>>([]);
 
   React.useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -68,14 +70,43 @@ export const MessageComposer: React.FC<Props> = ({ patients, initialPatientId, o
     return () => window.removeEventListener("keydown", handleKey);
   }, [onClose]);
 
-  const history = React.useMemo(() => {
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    const unsubscribe = subscribeServerData(() => setVersion((prev) => prev + 1));
+    let alive = true;
+    void messagesApi
+      .listele(patientId, 8)
+      .then((list) => {
+        if (alive) setServerMessages(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, [patientId, version]);
+
+  const view = React.useMemo(() => {
+    if (IS_HTTP) {
+      return serverMessages;
+    }
     void version;
     return sortMobileEventsDesc(
       readMobileEvents().filter((event) => event.patientId === patientId && event.type === "message")
-    ).slice(0, 8);
-  }, [patientId, version]);
+    )
+      .slice(0, 8)
+      .map((event) => ({
+        id: event.id,
+        text: (event.payload as MessagePayload).text,
+        direction: (event.payload as MessagePayload).direction === "dietitian" ? ("dietitian" as const) : ("patient" as const),
+        sentAt: event.timestamp,
+        readAt: (event.payload as MessagePayload).readAt ?? null
+      }));
+  }, [patientId, version, serverMessages]);
 
-  const lastOutboundUnread = history.find((event) => isOutbound(event) && !(event.payload as MessagePayload).readAt);
+  const lastOutboundUnread = view.find((item) => item.direction === "dietitian" && !item.readAt);
 
   const applyTemplate = (id: string) => {
     setTemplateId(id);
@@ -86,6 +117,18 @@ export const MessageComposer: React.FC<Props> = ({ patients, initialPatientId, o
   const send = () => {
     const trimmed = text.trim();
     if (!trimmed || !patientId) {
+      return;
+    }
+    if (IS_HTTP) {
+      void messagesApi
+        .gonder(patientId, trimmed, templateId === "serbest" ? undefined : templateId)
+        .then(() => {
+          setNotice("Mesaj danışanın mobil uygulamasına iletildi.");
+          setText(templateId === "serbest" ? "" : text);
+          notifyServerData();
+          setVersion((prev) => prev + 1);
+        })
+        .catch((error: unknown) => setNotice(errorMessage(error)));
       return;
     }
     ingestMobileEvent({
@@ -105,6 +148,17 @@ export const MessageComposer: React.FC<Props> = ({ patients, initialPatientId, o
 
   const simulateRead = () => {
     if (!lastOutboundUnread) {
+      return;
+    }
+    if (IS_HTTP) {
+      void messagesApi
+        .okundu(lastOutboundUnread.id)
+        .then(() => {
+          setNotice("Okundu bilgisi güncellendi.");
+          notifyServerData();
+          setVersion((prev) => prev + 1);
+        })
+        .catch((error: unknown) => setNotice(errorMessage(error)));
       return;
     }
     markMessageRead(lastOutboundUnread.id);
@@ -214,19 +268,18 @@ export const MessageComposer: React.FC<Props> = ({ patients, initialPatientId, o
               </button>
             ) : null}
           </div>
-          {history.length === 0 ? (
+          {view.length === 0 ? (
             <p className="muted">Bu danışanla henüz mesaj geçmişi yok.</p>
           ) : (
             <ul className="msg-list">
-              {history.map((event) => {
-                const payload = event.payload as MessagePayload;
-                const outbound = isOutbound(event);
+              {view.map((item) => {
+                const outbound = item.direction === "dietitian";
                 return (
-                  <li key={event.id} className={classNames("msg-item", outbound ? "msg-out" : "msg-in")}>
-                    <p className="msg-text">{payload.text}</p>
+                  <li key={item.id} className={classNames("msg-item", outbound ? "msg-out" : "msg-in")}>
+                    <p className="msg-text">{item.text}</p>
                     <small className="muted">
-                      {outbound ? "Panel → Danışan" : "Danışan → Panel"} · {timeAgoTr(event.timestamp)}
-                      {outbound ? (payload.readAt ? " · Okundu" : " · İletildi") : ""}
+                      {outbound ? "Panel → Danışan" : "Danışan → Panel"} · {timeAgoTr(item.sentAt)}
+                      {outbound ? (item.readAt ? " · Okundu" : " · İletildi") : ""}
                     </small>
                   </li>
                 );

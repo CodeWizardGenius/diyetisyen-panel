@@ -11,6 +11,7 @@ import { z } from "zod";
 import type { ExportAuditLog } from "../../../schemas";
 import { useToast } from "../../ui/toast";
 import { verifyPassword } from "../../../utils/crypto";
+import { IS_HTTP, authApi, errorMessage } from "../../../api";
 
 export interface ImportResult {
   ok: boolean;
@@ -135,6 +136,32 @@ export const SecurityPanel: React.FC<Props> = ({
   const [authPassword, setAuthPassword] = React.useState("");
   const [authError, setAuthError] = React.useState("");
   const [showPassword, setShowPassword] = React.useState(false);
+  const [passwordForm, setPasswordForm] = React.useState({ eski: "", yeni: "", tekrar: "" });
+  const [passwordMsg, setPasswordMsg] = React.useState<{ ok: boolean; text: string } | null>(null);
+  const [passwordPending, setPasswordPending] = React.useState(false);
+
+  const handlePasswordChange = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!passwordForm.eski || passwordForm.yeni.length < 8) {
+      setPasswordMsg({ ok: false, text: "Yeni şifre en az 8 karakter olmalı." });
+      return;
+    }
+    if (passwordForm.yeni !== passwordForm.tekrar) {
+      setPasswordMsg({ ok: false, text: "Yeni şifreler eşleşmiyor." });
+      return;
+    }
+    setPasswordPending(true);
+    try {
+      await authApi.sifreDegistir(passwordForm.eski, passwordForm.yeni);
+      setPasswordForm({ eski: "", yeni: "", tekrar: "" });
+      setPasswordMsg({ ok: true, text: "Şifreniz değiştirildi." });
+      showToast("Şifre değiştirildi", "success");
+    } catch (error) {
+      setPasswordMsg({ ok: false, text: errorMessage(error) });
+    } finally {
+      setPasswordPending(false);
+    }
+  };
 
   const handleImportFile = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -202,7 +229,9 @@ export const SecurityPanel: React.FC<Props> = ({
     if (!showExportAuth) return;
     const stored = localStorage.getItem("dp_auth_user_hash");
     if (!stored) {
-      setAuthError("Şifre doğrulaması yapılamadı — önce giriş yapın.");
+      // Demo/mock modunda hash tutulmuyor; oturum zaten açık olduğundan dışa aktarıma izin ver.
+      showExportAuth.resolve(authPassword);
+      setShowExportAuth(null);
       return;
     }
     verifyPassword(authPassword, stored).then((ok) => {
@@ -223,7 +252,7 @@ export const SecurityPanel: React.FC<Props> = ({
   };
 
   const performExport = async (type: "json" | "csv") => {
-    const pwd = await requestExportAuth(type);
+    const pwd = IS_HTTP ? "session" : await requestExportAuth(type);
     if (!pwd) return;
     const { patientCount, measurementCount } = measureCounts();
     if (type === "json") {
@@ -329,37 +358,100 @@ export const SecurityPanel: React.FC<Props> = ({
         ) : null}
       </SectionCard>
 
+      {IS_HTTP ? (
+        <SectionCard
+          title="Şifre Değiştir"
+          description="Şifreniz sunucuda güvenli biçimde saklanır; değişiklik diğer oturumları kapatır."
+          icon={<ShieldCheck size={15} />}
+        >
+          <form onSubmit={handlePasswordChange} className="form-grid">
+            <Field label="Mevcut şifre" htmlFor="pwd-old">
+              <input
+                id="pwd-old"
+                type="password"
+                autoComplete="current-password"
+                className="input"
+                value={passwordForm.eski}
+                onChange={(event) => setPasswordForm((prev) => ({ ...prev, eski: event.target.value }))}
+              />
+            </Field>
+            <Field label="Yeni şifre (en az 8 karakter)" htmlFor="pwd-new">
+              <input
+                id="pwd-new"
+                type="password"
+                autoComplete="new-password"
+                className="input"
+                value={passwordForm.yeni}
+                onChange={(event) => setPasswordForm((prev) => ({ ...prev, yeni: event.target.value }))}
+              />
+            </Field>
+            <Field label="Yeni şifre (tekrar)" htmlFor="pwd-repeat">
+              <input
+                id="pwd-repeat"
+                type="password"
+                autoComplete="new-password"
+                className="input"
+                value={passwordForm.tekrar}
+                onChange={(event) => setPasswordForm((prev) => ({ ...prev, tekrar: event.target.value }))}
+              />
+            </Field>
+            <div className="form-full">
+              <button type="submit" className="btn btn-primary btn-small" disabled={passwordPending}>
+                {passwordPending ? "Kaydediliyor…" : "Şifreyi Değiştir"}
+              </button>
+              {passwordMsg ? (
+                <p className={passwordMsg.ok ? "import-ok" : "field-error"} role="status">
+                  {passwordMsg.text}
+                </p>
+              ) : null}
+            </div>
+          </form>
+        </SectionCard>
+      ) : null}
+
       <SectionCard
         title="Danışan Verilerini Yedekle"
-        description="Tüm danışanlar ve ölçüm geçmişleri — dışa aktarın veya bir yedekten geri yükleyin."
+        description={
+          IS_HTTP
+            ? "Sunucu tarafı yedekleme bu sürümde kapalı. Denetim kayıtları salt okunur olarak görüntülenebilir."
+            : "Tüm danışanlar ve ölçüm geçmişleri — dışa aktarın veya bir yedekten geri yükleyin."
+        }
         icon={<Download size={15} />}
       >
-        <div className="card-actions">
-          <button type="button" className="btn btn-outline btn-small" onClick={() => performExport("json")}>
-            <FileJson size={14} /> JSON İndir
-          </button>
-          <button type="button" className="btn btn-outline btn-small" onClick={() => performExport("csv")}>
-            <FileSpreadsheet size={14} /> CSV İndir
-          </button>
-          <button type="button" className="btn btn-outline btn-small" onClick={() => fileInputRef.current?.click()}>
-            <Upload size={14} /> JSON Yükle
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="application/json,.json"
-            className="visually-hidden"
-            onChange={handleImportFile}
-            aria-hidden="true"
-            tabIndex={-1}
-          />
-        </div>
-        {exported ? <p className="muted muted-spaced">{exported}</p> : null}
-        {importMsg ? (
-          <p className={classNames("muted-spaced", importMsg.ok ? "import-ok" : "field-error")} role="status">
-            {importMsg.text}
+        {IS_HTTP ? (
+          <p className="muted muted-spaced">
+            Yedek indirme/yükleme özelliği panelde geçici olarak gizlendi; danışan verileri sunucuda tutulur.
           </p>
-        ) : null}
+        ) : (
+          <>
+            <div className="card-actions">
+              <button type="button" className="btn btn-outline btn-small" onClick={() => performExport("json")}>
+                <FileJson size={14} /> JSON İndir
+              </button>
+              <button type="button" className="btn btn-outline btn-small" onClick={() => performExport("csv")}>
+                <FileSpreadsheet size={14} /> CSV İndir
+              </button>
+              <button type="button" className="btn btn-outline btn-small" onClick={() => fileInputRef.current?.click()}>
+                <Upload size={14} /> JSON Yükle
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/json,.json"
+                className="visually-hidden"
+                onChange={handleImportFile}
+                aria-hidden="true"
+                tabIndex={-1}
+              />
+            </div>
+            {exported ? <p className="muted muted-spaced">{exported}</p> : null}
+            {importMsg ? (
+              <p className={classNames("muted-spaced", importMsg.ok ? "import-ok" : "field-error")} role="status">
+                {importMsg.text}
+              </p>
+            ) : null}
+          </>
+        )}
       </SectionCard>
 
       {showExportAuth && (

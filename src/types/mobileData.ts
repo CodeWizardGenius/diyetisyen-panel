@@ -1,14 +1,10 @@
 /**
  * Danışan mobil uygulaması → diyetisyen paneli veri akışı.
- *
- * Bu demo sürümde gerçek bir sunucu yoktur; mobil uygulamadan gelen olaylar
- * `ingestMobileEvent` ile alınır ve tarayıcının yerel deposuna yazılır. Doğrulama
- * "reddetme" değil "işaretleme" mantığıyla çalışır: eksik veya geçersiz alanlar
- * kaydı düşürmez, kayıt `status: "eksik"` ve `issues` ile işaretlenir.
- *
- * Gerçek bir API'ye geçişte yalnızca `ingestMobileEvent` gövdesinin HTTP çağrısına
- * dönüştürülmesi yeterlidir; tipler ve doğrulama kuralları aynen kullanılır.
+ * ...
  */
+
+import { IS_HTTP } from "../api/config";
+import { cache } from "../api/cache";
 
 export type MobileEventType =
   | "meal"
@@ -311,6 +307,9 @@ const readRaw = (): MobileEvent[] => {
   if (typeof window === "undefined") {
     return [];
   }
+  if (IS_HTTP) {
+    return cache.activities;
+  }
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(MOBILE_EVENTS_STORAGE_KEY) ?? "[]");
     return Array.isArray(parsed) ? (parsed as MobileEvent[]) : [];
@@ -321,6 +320,11 @@ const readRaw = (): MobileEvent[] => {
 
 const writeRaw = (events: MobileEvent[]): void => {
   if (typeof window === "undefined") {
+    return;
+  }
+  if (IS_HTTP) {
+    cache.activities = events;
+    window.dispatchEvent(new CustomEvent(MOBILE_EVENTS_CHANGED));
     return;
   }
   try {
@@ -524,7 +528,7 @@ export const MOBILE_EVENT_EXAMPLES: Record<MobileEventType, { payload: Record<st
  * Sadece development modunda çalışır (import.meta.env.DEV).
  */
 export const seedMobileDataIfEmpty = (now: number = Date.now()): void => {
-  if (typeof window === "undefined") {
+  if (typeof window === "undefined" || IS_HTTP) {
     return;
   }
   // Sadece development modunda seed ata

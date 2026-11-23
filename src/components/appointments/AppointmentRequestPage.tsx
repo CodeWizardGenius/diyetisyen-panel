@@ -1,6 +1,7 @@
 import React from "react";
 import { CalendarDays, CheckCircle2, Leaf, Send } from "lucide-react";
 import { isValidPatientLink, markPatientLinkUsed } from "../../types/patientLinks";
+import { IS_HTTP, errorMessage, publicApi } from "../../api";
 
 const APPOINTMENTS_STORAGE_KEY = "dp_appointments";
 const PATIENTS_STORAGE_KEY = "dp_patients";
@@ -56,20 +57,79 @@ interface Props {
 
 /** Danışanın kendi randevu talebini oluşturduğu herkese açık sayfa (token'lı link). */
 export const AppointmentRequestPage: React.FC<Props> = ({ patientId, token }) => {
-  const valid = Number.isInteger(patientId) && patientId > 0 && isValidPatientLink(patientId, token);
   const today = new Date().toISOString().slice(0, 10);
   const [date, setDate] = React.useState(today);
   const [time, setTime] = React.useState("10:00");
   const [type, setType] = React.useState(REQUEST_TYPES[0]);
+  const [name, setName] = React.useState("");
+  const [phone, setPhone] = React.useState("");
+  const [note, setNote] = React.useState("");
   const [sent, setSent] = React.useState(false);
   const [error, setError] = React.useState("");
+  const [pending, setPending] = React.useState(false);
+  const [metaState, setMetaState] = React.useState<
+    | { status: "loading" }
+    | { status: "invalid" }
+    | { status: "ready"; patientName: string; dietitianName?: string; expiresAt?: string }
+  >(() => (IS_HTTP ? { status: "loading" } : { status: "invalid" }));
 
-  const patientName = valid ? readPatientName(patientId) : "";
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      const valid = Number.isInteger(patientId) && patientId > 0 && isValidPatientLink(patientId, token);
+      setMetaState(
+        valid
+          ? { status: "ready", patientName: readPatientName(patientId) }
+          : { status: "invalid" }
+      );
+      return;
+    }
+    let alive = true;
+    void publicApi
+      .link(token)
+      .then((meta) => {
+        if (!alive) return;
+        setMetaState({
+          status: "ready",
+          patientName: meta.patientName ?? "Danışan",
+          ...(meta.dietitianName ? { dietitianName: meta.dietitianName } : {}),
+          ...(meta.expiresAt ? { expiresAt: meta.expiresAt } : {})
+        });
+      })
+      .catch(() => {
+        if (alive) setMetaState({ status: "invalid" });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [patientId, token]);
+
+  const valid = metaState.status === "ready";
+  const patientName = metaState.status === "ready" ? metaState.patientName : "";
 
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!date || !time || !type) {
-      setError("Lütfen tarih, saat ve görüşme türünü seçin.");
+    if (!date || !time) {
+      setError("Lütfen tarih ve saat seçin.");
+      return;
+    }
+    if (IS_HTTP) {
+      if (name.trim().length < 1 || phone.trim().length < 5) {
+        setError("Lütfen ad soyad ve telefon bilgisini girin.");
+        return;
+      }
+      setPending(true);
+      setError("");
+      void publicApi
+        .talepGonder(token, {
+          name: name.trim(),
+          phone: phone.trim(),
+          preferredDate: date,
+          preferredTime: time,
+          ...(note.trim() ? { note: `${type} · ${note.trim()}` } : { note: type })
+        })
+        .then(() => setSent(true))
+        .catch((submitError: unknown) => setError(errorMessage(submitError)))
+        .finally(() => setPending(false));
       return;
     }
     appendRequest({
@@ -81,9 +141,7 @@ export const AppointmentRequestPage: React.FC<Props> = ({ patientId, token }) =>
       type,
       status: "Bekliyor"
     });
-    if (valid) {
-      markPatientLinkUsed(patientId);
-    }
+    markPatientLinkUsed(patientId);
     setError("");
     setSent(true);
   };
@@ -101,12 +159,14 @@ export const AppointmentRequestPage: React.FC<Props> = ({ patientId, token }) =>
           </div>
         </header>
 
-        {!valid ? (
+        {metaState.status === "loading" ? (
+          <p className="muted">Bağlantı kontrol ediliyor…</p>
+        ) : !valid ? (
           <div role="alert">
             <h1 className="request-title">Bağlantı geçersiz</h1>
             <p className="muted">
-              Bu randevu talebi bağlantısı geçersiz veya iptal edilmiş. Lütfen diyetisyeninizden güncel bağlantı
-              isteyin.
+              Bu randevu talebi bağlantısı geçersiz, süresi dolmuş veya daha önce kullanılmış. Lütfen
+              diyetisyeninizden güncel bağlantı isteyin.
             </p>
           </div>
         ) : sent ? (
@@ -114,16 +174,46 @@ export const AppointmentRequestPage: React.FC<Props> = ({ patientId, token }) =>
             <CheckCircle2 size={34} />
             <h1 className="request-title">Talebiniz alındı!</h1>
             <p className="muted">
-              <strong>{patientName}</strong> adına {date} · {time} · {type} talebiniz oluşturuldu. Durum:{" "}
+              {date} · {time} için talebiniz oluşturuldu. Durum:{" "}
               <span className="badge badge-amber">Bekliyor</span> — diyetisyen onayı sonrası kesinleşir.
             </p>
           </div>
         ) : (
           <>
             <h1 className="request-title">Merhaba {patientName}</h1>
-            <p className="muted">Aşağıdan uygun olduğunuz gün ve saati seçip talebinizi gönderin.</p>
+            <p className="muted">
+              Aşağıdan uygun olduğunuz gün ve saati seçip talebinizi gönderin.
+              {metaState.status === "ready" && metaState.dietitianName
+                ? ` Diyetisyen: ${metaState.dietitianName}.`
+                : ""}
+            </p>
             <form onSubmit={submit} noValidate>
               <div className="form-grid">
+                {IS_HTTP ? (
+                  <>
+                    <div>
+                      <label className="label" htmlFor="ar-name">Ad Soyad *</label>
+                      <input
+                        id="ar-name"
+                        className="input"
+                        value={name}
+                        onChange={(event) => setName(event.target.value)}
+                        maxLength={100}
+                      />
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="ar-phone">Telefon *</label>
+                      <input
+                        id="ar-phone"
+                        className="input"
+                        value={phone}
+                        onChange={(event) => setPhone(event.target.value)}
+                        inputMode="tel"
+                        maxLength={20}
+                      />
+                    </div>
+                  </>
+                ) : null}
                 <div>
                   <label className="label" htmlFor="ar-date">Tarih *</label>
                   <input
@@ -160,11 +250,24 @@ export const AppointmentRequestPage: React.FC<Props> = ({ patientId, token }) =>
                     ))}
                   </select>
                 </div>
+                {IS_HTTP ? (
+                  <div className="form-full">
+                    <label className="label" htmlFor="ar-note">Not</label>
+                    <textarea
+                      id="ar-note"
+                      className="input"
+                      rows={3}
+                      value={note}
+                      onChange={(event) => setNote(event.target.value)}
+                      maxLength={2000}
+                    />
+                  </div>
+                ) : null}
               </div>
               {error ? <p className="field-error">{error}</p> : null}
               <div className="modal-actions">
-                <button type="submit" className="btn btn-primary">
-                  <Send size={14} /> Randevu Talebi Gönder
+                <button type="submit" className="btn btn-primary" disabled={pending}>
+                  <Send size={14} /> {pending ? "Gönderiliyor…" : "Randevu Talebi Gönder"}
                 </button>
               </div>
             </form>

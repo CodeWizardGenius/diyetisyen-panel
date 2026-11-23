@@ -1,6 +1,8 @@
 /** Uyarı & Risk Yönetim Merkezi için veri modelleri ve kalıcı depolama yardımcıları. */
 
 import { loadSettings } from "./settings";
+import { IS_HTTP } from "../api/config";
+import { cache } from "../api/cache";
 
 export type AlertSeverity = "critical" | "warning" | "info";
 export type AlertCategory =
@@ -101,6 +103,9 @@ const isValidRules = (value: Record<string, unknown>): boolean =>
 
 /** Kayıtlı kuralları okur; yoksa/bozuksa `fallback` (önce klinik ayarları) kullanır. */
 export const loadAlertRules = (fallback?: AlertRules): AlertRules => {
+  if (IS_HTTP) {
+    return { ...(cache.rules ?? fallback ?? DEFAULT_ALERT_RULES) };
+  }
   const base: AlertRules = fallback ?? { ...DEFAULT_ALERT_RULES };
   if (typeof window === "undefined") {
     return { ...base };
@@ -170,6 +175,9 @@ export const syncAlertRulesWithClinic = (clinic: {
 
 /** Çözüldü olarak işaretlenen uyarı id'leri (motor yeniden üretse bile korunur). */
 export const loadResolvedIds = (): string[] => {
+  if (IS_HTTP) {
+    return cache.alerts.filter((alert) => alert.isResolved).map((alert) => alert.id);
+  }
   if (typeof window === "undefined") {
     return [];
   }
@@ -191,6 +199,9 @@ export const saveResolvedIds = (ids: string[]): void => {
 
 /** Kalıcı olarak silinen (gizlenen) uyarı id'leri — motor yeniden üretse bile gösterilmez. */
 export const loadDismissedIds = (): string[] => {
+  if (IS_HTTP) {
+    return [];
+  }
   if (typeof window === "undefined") {
     return [];
   }

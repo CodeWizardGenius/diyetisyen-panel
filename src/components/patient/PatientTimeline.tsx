@@ -1,6 +1,7 @@
 import React from "react";
 import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
 import { readMobileEvents } from "../../types/mobileData";
+import { IS_HTTP, cache, subscribeServerData } from "../../api";
 import type { MeasurementLike } from "../../types/settings";
 import {
   bucketDays,
@@ -58,10 +59,21 @@ const weightPointsInWeek = (all: WeightPoint[], start: number, end: number): Wei
 /** Danışan detayı "Zaman Çizelgesi": son 4 hafta, planlanan vs gerçekleşen. */
 export const PatientTimeline: React.FC<Props> = ({ patientId, measurements }) => {
   const [weekOffset, setWeekOffset] = React.useState(0);
+  const [serverTick, setServerTick] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    return subscribeServerData(() => setServerTick((tick) => tick + 1));
+  }, []);
 
   const events = React.useMemo(
-    () => readMobileEvents().filter((event) => event.patientId === patientId),
-    [patientId]
+    () =>
+      IS_HTTP
+        ? (void serverTick, cache.eventsByPatient[patientId] ?? [])
+        : readMobileEvents().filter((event) => event.patientId === patientId),
+    [patientId, serverTick]
   );
 
   const now = Date.now();

@@ -18,6 +18,7 @@ import {
 import { DEMO_PATIENTS, DEMO_STATS } from "../../data/demo";
 import { LEGAL_LINKS, SUPPORT_EMAIL } from "./LegalPages";
 import { classNames } from "../settings/classNames";
+import { IS_HTTP } from "../../api/config";
 
 interface Props {
   /** Ana çağrı butonu: giriş yapılmamışsa giriş ekranına, yapılmışsa panele götürür. */
@@ -115,7 +116,11 @@ export const LandingPage: React.FC<Props> = ({ onStart, isAuthed }) => {
                 </button>
               </div>
               {!isAuthed ? (
-                <p className="lp-note">Demo sürümde herhangi bir e-posta ve şifreyle giriş yapabilirsiniz.</p>
+                <p className="lp-note">
+                  {IS_HTTP
+                    ? "Giriş için kliniğinizin size verdiği hesap bilgilerini kullanın."
+                    : "Demo sürümde herhangi bir e-posta ve şifreyle giriş yapabilirsiniz."}
+                </p>
               ) : null}
             </div>
 
@@ -148,7 +153,7 @@ export const LandingPage: React.FC<Props> = ({ onStart, isAuthed }) => {
                       <small>{patient.plan}</small>
                     </span>
                     <span className={classNames("lp-pill", patient.status === "Risk" && "lp-pill-rose")}>
-                      %{patient.compliance}
+                      {patient.compliance === null ? "—" : `%${patient.compliance}`}
                     </span>
                   </li>
                 ))}

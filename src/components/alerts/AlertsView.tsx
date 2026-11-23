@@ -36,6 +36,7 @@ import {
   saveResolvedIds,
   SEVERITY_META
 } from "../../types/alerts";
+import { IS_HTTP, cache, errorMessage, insightApi, notifyServerData, subscribeServerData } from "../../api";
 import { buildAlerts, isQuietNow, timeAgoTr, type EnginePatient } from "./alertEngine";
 import { AlertRulesPanel } from "./AlertRulesPanel";
 import { classNames } from "../settings/classNames";
@@ -179,13 +180,29 @@ const AlertCard: React.FC<{
 
 export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, getMobileEvents, onOpenPatient }) => {
   const [tab, setTab] = React.useState<AlertsTab>("inbox");
-  const [rules, setRules] = React.useState<AlertRules>(() => loadAlertRules(rulesFromClinicSettings()));
-  const [savedRules, setSavedRules] = React.useState<AlertRules>(() => loadAlertRules(rulesFromClinicSettings()));
+  const [rules, setRules] = React.useState<AlertRules>(() =>
+    IS_HTTP ? (cache.rules ?? DEFAULT_ALERT_RULES) : loadAlertRules(rulesFromClinicSettings())
+  );
+  const [savedRules, setSavedRules] = React.useState<AlertRules>(() =>
+    IS_HTTP ? (cache.rules ?? DEFAULT_ALERT_RULES) : loadAlertRules(rulesFromClinicSettings())
+  );
   const [resolvedIds, setResolvedIds] = React.useState<string[]>(() => loadResolvedIds());
   const [dismissedIds, setDismissedIds] = React.useState<string[]>(() => loadDismissedIds());
   const [filter, setFilter] = React.useState<FeedFilter>("all");
   const [query, setQuery] = React.useState("");
   const [toast, setToast] = React.useState<string | null>(null);
+  const [serverTick, setServerTick] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    return subscribeServerData(() => {
+      setServerTick((tick) => tick + 1);
+      setSavedRules(cache.rules ?? DEFAULT_ALERT_RULES);
+      setRules(cache.rules ?? DEFAULT_ALERT_RULES);
+    });
+  }, []);
   const toastTimer = React.useRef<number | undefined>(undefined);
 
   React.useEffect(() => () => window.clearTimeout(toastTimer.current), []);
@@ -197,11 +214,16 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, getMobi
   }, []);
 
   const alerts = React.useMemo(() => {
+    if (IS_HTTP) {
+      void serverTick;
+      // Sunucu uyarıları hazır gelir; panel yalnızca gösterir.
+      return cache.alerts;
+    }
     const dismissed = new Set(dismissedIds);
     return buildAlerts(patients, getMeasurements, savedRules, resolvedIds, Date.now(), getMobileEvents).filter(
       (alert) => !dismissed.has(alert.id)
     );
-  }, [patients, getMeasurements, getMobileEvents, savedRules, resolvedIds, dismissedIds]);
+  }, [patients, getMeasurements, getMobileEvents, savedRules, resolvedIds, dismissedIds, serverTick]);
 
   const quietActive = React.useMemo(
     () => isQuietNow(savedRules.quietHoursRange, savedRules.quietHoursEnabled),
@@ -248,6 +270,20 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, getMobi
   );
 
   const handleSaveRules = React.useCallback(() => {
+    if (IS_HTTP) {
+      void insightApi
+        .kurallarKaydet(rules)
+        .then((saved) => {
+          cache.rules = saved;
+          setSavedRules(saved);
+          notifyServerData();
+          showToast("Kurallar kaydedildi — uyarı akışı güncellendi.");
+        })
+        .catch((error: unknown) =>
+          showToast(error instanceof Error ? error.message : "Kurallar kaydedilemedi.")
+        );
+      return;
+    }
     saveAlertRules(rules);
     syncClinicSettingsWithRules(rules);
     setSavedRules({ ...rules });
@@ -256,6 +292,21 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, getMobi
 
   const handleResetRules = React.useCallback(() => {
     const next = { ...DEFAULT_ALERT_RULES };
+    if (IS_HTTP) {
+      void insightApi
+        .kurallarKaydet(next)
+        .then((saved) => {
+          cache.rules = saved;
+          setRules(saved);
+          setSavedRules(saved);
+          notifyServerData();
+          showToast("Kurallar varsayılanlara sıfırlandı.");
+        })
+        .catch((error: unknown) =>
+          showToast(error instanceof Error ? error.message : "Kurallar kaydedilemedi.")
+        );
+      return;
+    }
     saveAlertRules(next);
     syncClinicSettingsWithRules(next);
     setRules(next);
@@ -265,6 +316,21 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, getMobi
 
   const handleResolve = React.useCallback(
     (id: string) => {
+      if (IS_HTTP) {
+        void insightApi
+          .coz(id)
+          .then(() => {
+            cache.alerts = cache.alerts.map((alert) =>
+              alert.id === id ? { ...alert, isResolved: true } : alert
+            );
+            notifyServerData();
+            showToast("Uyarı çözüldü olarak işaretlendi.");
+          })
+          .catch((error: unknown) =>
+            showToast(error instanceof Error ? error.message : "Uyarı çözülemedi.")
+          );
+        return;
+      }
       setResolvedIds((prev) => {
         const next = prev.includes(id) ? prev : [...prev, id];
         saveResolvedIds(next);
@@ -277,6 +343,10 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, getMobi
 
   const handleReopen = React.useCallback(
     (id: string) => {
+      if (IS_HTTP) {
+        showToast("Sunucu, koşul sürüyorsa uyarıyı kendisi yeniden açar.");
+        return;
+      }
       setResolvedIds((prev) => {
         const next = prev.filter((item) => item !== id);
         saveResolvedIds(next);
@@ -289,6 +359,19 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, getMobi
 
   const handleDelete = React.useCallback(
     (id: string) => {
+      if (IS_HTTP) {
+        void insightApi
+          .yoksay(id)
+          .then(() => {
+            cache.alerts = cache.alerts.filter((alert) => alert.id !== id);
+            notifyServerData();
+            showToast("Uyarı silindi.");
+          })
+          .catch((error: unknown) =>
+            showToast(error instanceof Error ? error.message : "Uyarı silinemedi.")
+          );
+        return;
+      }
       setDismissedIds((prev) => {
         const next = prev.includes(id) ? prev : [...prev, id];
         saveDismissedIds(next);
@@ -303,6 +386,19 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, getMobi
     const resolvedAlertIds = alerts.filter((alert) => alert.isResolved).map((alert) => alert.id);
     if (resolvedAlertIds.length === 0) {
       showToast("Silinecek çözülmüş uyarı yok.");
+      return;
+    }
+    if (IS_HTTP) {
+      void Promise.all(resolvedAlertIds.map((id) => insightApi.yoksay(id)))
+        .then(() => {
+          const removed = new Set(resolvedAlertIds);
+          cache.alerts = cache.alerts.filter((alert) => !removed.has(alert.id));
+          notifyServerData();
+          showToast(`${resolvedAlertIds.length} çözülmüş uyarı silindi.`);
+        })
+        .catch((error: unknown) =>
+          showToast(error instanceof Error ? error.message : "Uyarılar silinemedi.")
+        );
       return;
     }
     setDismissedIds((prev) => {
@@ -321,6 +417,18 @@ export const AlertsView: React.FC<Props> = ({ patients, getMeasurements, getMobi
       return;
     }
     const allIds = alerts.map((alert) => alert.id);
+    if (IS_HTTP) {
+      void Promise.all(allIds.map((id) => insightApi.yoksay(id)))
+        .then(() => {
+          cache.alerts = [];
+          notifyServerData();
+          showToast("Tüm uyarılar silindi.");
+        })
+        .catch((error: unknown) =>
+          showToast(error instanceof Error ? error.message : "Uyarılar silinemedi.")
+        );
+      return;
+    }
     setDismissedIds((prev) => {
       const next = Array.from(new Set([...prev, ...allIds]));
       saveDismissedIds(next);

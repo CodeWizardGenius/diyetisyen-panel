@@ -34,6 +34,7 @@ import {
   weightChangeIn
 } from "../patientInsights";
 import { classNames } from "../settings/classNames";
+import { IS_HTTP, cache, errorMessage, insightApi } from "../../api";
 
 const REPORT_SENT_KEY = "dp_report_sent_v1";
 
@@ -88,6 +89,27 @@ export const WeeklyReport: React.FC<Props> = ({ patient, measurements, onClose }
   const [approved, setApproved] = React.useState(false);
   const [sentAt, setSentAt] = React.useState<string | null>(null);
   const [version, setVersion] = React.useState(0);
+  const [serverReport, setServerReport] = React.useState<import("../../api/types").WeeklyReportData | null>(null);
+  const [serverError, setServerError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    let alive = true;
+    setServerError(null);
+    void insightApi
+      .haftalikRapor(patient.id, weekOffset)
+      .then((data) => {
+        if (alive) setServerReport(data);
+      })
+      .catch((error: unknown) => {
+        if (alive) setServerError(errorMessage(error));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [patient.id, weekOffset, version]);
 
   React.useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -101,6 +123,38 @@ export const WeeklyReport: React.FC<Props> = ({ patient, measurements, onClose }
 
   const report = React.useMemo(() => {
     const now = Date.now();
+    if (IS_HTTP) {
+      const data = serverReport;
+      const fromMs = data ? Date.parse(`${data.weekStart}T00:00:00`) : startOfWeekMs(now) - weekOffset * 7 * DAY_MS;
+      const toMs = fromMs + 7 * DAY_MS;
+      const rules = cache.rules ?? loadAlertRules(rulesFromClinicSettings());
+      const settings = loadSettings();
+      return {
+        events: [] as MobileEvent[],
+        fromMs,
+        toMs,
+        slices: (data?.slices ?? []).map((slice) => ({
+          key: slice.key,
+          start: Date.parse(`${slice.key}T00:00:00`),
+          mealsLogged: slice.mealsLogged,
+          mealCompliance: slice.mealCompliance,
+          waterMl: slice.waterMl,
+          weightKg: slice.weightKg,
+          hasData: slice.hasData
+        })),
+        compliance: data?.compliance ?? { score: null, meals: 0, compliant: 0, partial: 0, offPlan: 0 },
+        trend: data?.trend ?? null,
+        previous: { score: data?.previousScore ?? null },
+        alerts: data?.alerts ?? [],
+        rules,
+        weight: data?.weight ?? null,
+        waterAvg: data?.waterAvgMl ?? null,
+        logged: data?.loggedDays ?? 0,
+        settings,
+        rangeLabel: data?.rangeLabel ?? "",
+        generatedAt: data?.generatedAt ? new Date(data.generatedAt) : new Date(now)
+      };
+    }
     const events: MobileEvent[] = readMobileEvents().filter((event) => event.patientId === patient.id);
     const fromMs = startOfWeekMs(now) - weekOffset * 7 * DAY_MS;
     const toMs = fromMs + 7 * DAY_MS;
@@ -160,14 +214,28 @@ export const WeeklyReport: React.FC<Props> = ({ patient, measurements, onClose }
       rangeLabel,
       generatedAt: new Date(now)
     };
-  }, [patient, measurements, weekOffset, version]);
+  }, [patient, measurements, weekOffset, version, serverReport]);
 
   const reportKey = `${patient.id}:${dayKeyFromMs(report.fromMs)}`;
-  const alreadySentAt = sentAt ?? readSentMap()[reportKey] ?? null;
+  const alreadySentAt = sentAt ?? (IS_HTTP ? null : readSentMap()[reportKey] ?? null);
   const canSend = approved && !alreadySentAt;
 
   const sendReport = () => {
     if (!canSend) {
+      return;
+    }
+    if (IS_HTTP) {
+      void insightApi
+        .raporGonder(patient.id, weekOffset)
+        .then(() => {
+          const at = new Date().toISOString();
+          if (!IS_HTTP) {
+            markReportSent(reportKey, at);
+          }
+          setSentAt(at);
+          setVersion((current) => current + 1);
+        })
+        .catch((error: unknown) => setServerError(errorMessage(error)));
       return;
     }
     const scoreText = report.compliance.score === null ? "veri yok" : `%${report.compliance.score}`;
@@ -201,6 +269,11 @@ export const WeeklyReport: React.FC<Props> = ({ patient, measurements, onClose }
               Haftalık Rapor
             </h3>
             <p className="muted">Önizleyin, onaylayın ve danışana gönderin. Onay olmadan gönderim kapalıdır.</p>
+            {serverError ? (
+              <p className="field-error" role="alert">
+                {serverError}
+              </p>
+            ) : null}
           </div>
           <div className="summary-toolbar">
             <button
