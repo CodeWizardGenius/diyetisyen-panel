@@ -11,7 +11,8 @@ import { z } from "zod";
 import type { ExportAuditLog } from "../../../schemas";
 import { useToast } from "../../ui/toast";
 import { verifyPassword } from "../../../utils/crypto";
-import { IS_HTTP, authApi, errorMessage } from "../../../api";
+import { IS_HTTP, authApi, backupApi, bootstrapCore, errorMessage, isApiError, notifyServerData } from "../../../api";
+import type { BackupPayload, ExportAuditEntry } from "../../../api/types";
 
 export interface ImportResult {
   ok: boolean;
@@ -118,6 +119,56 @@ const ImportPayloadSchema = z.object({
   }))
 }).strict();
 
+const isBackupPayload = (value: unknown): value is BackupPayload => {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<BackupPayload>;
+  return (
+    payload.version === 1 &&
+    Array.isArray(payload.patients) &&
+    payload.patients.length > 0 &&
+    payload.patients.every(
+      (patient) =>
+        patient &&
+        typeof patient === "object" &&
+        typeof patient.name === "string" &&
+        typeof patient.startDate === "string" &&
+        typeof patient.endDate === "string"
+    )
+  );
+};
+
+const csvFromBackup = (payload: BackupPayload): string => {
+  const header =
+    "danisan_id;danisan;plan;uyum;durum;tarih;kilo_kg;boy_cm;yag_yuzde;kas_kg;bel_cm;kalca_cm;not";
+  const lines = payload.patients.flatMap((patient) => {
+    const base = [
+      patient.id,
+      patient.name,
+      patient.plan,
+      patient.compliance ?? "",
+      patient.status
+    ];
+    const rows = patient.measurements ?? [];
+    if (rows.length === 0) {
+      return [csvRow([...base, "", "", "", "", "", "", "", ""])];
+    }
+    return rows.map((measurement) =>
+      csvRow([
+        ...base,
+        measurement.date,
+        measurement.weightKg ?? "",
+        measurement.heightCm ?? "",
+        measurement.bodyFatPercentage ?? "",
+        measurement.muscleMassKg ?? "",
+        measurement.waistCm ?? "",
+        measurement.hipCm ?? "",
+        measurement.notes ?? ""
+      ])
+    );
+  });
+  return `﻿${[header, ...lines].join("\n")}`;
+};
+
 export const SecurityPanel: React.FC<Props> = ({
   sessionTimeoutMin,
   onSessionTimeoutChange,
@@ -139,6 +190,22 @@ export const SecurityPanel: React.FC<Props> = ({
   const [passwordForm, setPasswordForm] = React.useState({ eski: "", yeni: "", tekrar: "" });
   const [passwordMsg, setPasswordMsg] = React.useState<{ ok: boolean; text: string } | null>(null);
   const [passwordPending, setPasswordPending] = React.useState(false);
+  const [backupBusy, setBackupBusy] = React.useState<"export-json" | "export-csv" | "import" | null>(null);
+  const [audit, setAudit] = React.useState<ExportAuditEntry[] | null>(null);
+
+  const loadAudit = React.useCallback(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    void backupApi
+      .denetim()
+      .then((rows) => setAudit(rows))
+      .catch(() => setAudit(null));
+  }, []);
+
+  React.useEffect(() => {
+    loadAudit();
+  }, [loadAudit]);
 
   const handlePasswordChange = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -169,6 +236,57 @@ export const SecurityPanel: React.FC<Props> = ({
     if (!file) return;
     if (file.size > MAX_IMPORT_BYTES) {
       setImportMsg({ ok: false, text: "Dosya çok büyük — en fazla 5 MB'lık bir JSON yedeği seçin." });
+      return;
+    }
+    if (IS_HTTP) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const parsed: unknown = JSON.parse(String(reader.result));
+          if (!isBackupPayload(parsed)) {
+            setImportMsg({
+              ok: false,
+              text: "Yedek şeması geçersiz: version=1 ve en az bir danışan (ad, başlangıç, bitiş) gerekli."
+            });
+            return;
+          }
+          if (
+            !window.confirm(
+              "Sunucu yedeği içe aktarılsın mı? Bu işlem yalnızca EKLER: mevcut danışanlar ve ölçümler korunur, yedekteki danışanlar yeni danışan numaralarıyla oluşturulur."
+            )
+          ) {
+            return;
+          }
+          setBackupBusy("import");
+          setImportMsg(null);
+          void backupApi
+            .yukle(parsed)
+            .then((result) => {
+              setImportMsg({
+                ok: true,
+                text: `${result.patientsCreated} danışan ve ${result.measurementsCreated} ölçüm eklendi. Mevcut kayıtlar korundu.`
+              });
+              showToast(
+                `${result.patientsCreated} danışan içe aktarıldı (${result.measurementsCreated} ölçüm)`,
+                "success"
+              );
+              loadAudit();
+              return bootstrapCore().then(() => notifyServerData());
+            })
+            .catch((error: unknown) => {
+              const text =
+                isApiError(error) && error.status === 413
+                  ? "500'den fazla danışan var; yedek bu sürümde parçalı alınamıyor."
+                  : errorMessage(error);
+              setImportMsg({ ok: false, text });
+            })
+            .finally(() => setBackupBusy(null));
+        } catch {
+          setImportMsg({ ok: false, text: "Dosya okunamadı — geçerli bir JSON yedeği seçin." });
+        }
+      };
+      reader.onerror = () => setImportMsg({ ok: false, text: "Dosya okunamadı." });
+      reader.readAsText(file);
       return;
     }
     const reader = new FileReader();
@@ -252,7 +370,47 @@ export const SecurityPanel: React.FC<Props> = ({
   };
 
   const performExport = async (type: "json" | "csv") => {
-    const pwd = IS_HTTP ? "session" : await requestExportAuth(type);
+    if (IS_HTTP) {
+      setBackupBusy(type === "json" ? "export-json" : "export-csv");
+      setExported(null);
+      try {
+        const payload = await backupApi.indir();
+        const patientCount = payload.patients.length;
+        const measurementCount = payload.patients.reduce(
+          (sum, patient) => sum + (patient.measurements?.length ?? 0),
+          0
+        );
+        if (type === "json") {
+          downloadFile(
+            `danisanlar-yedek-${todayStamp()}.json`,
+            JSON.stringify(payload, null, 2),
+            "application/json;charset=utf-8"
+          );
+        } else {
+          downloadFile(
+            `danisanlar-yedek-${todayStamp()}.csv`,
+            csvFromBackup(payload),
+            "text/csv;charset=utf-8"
+          );
+        }
+        setExported(`${type.toUpperCase()} yedeği indirildi.`);
+        showToast(
+          `${type.toUpperCase()} dışa aktarıldı (${patientCount} danışan, ${measurementCount} ölçüm)`,
+          "success"
+        );
+        loadAudit();
+      } catch (error) {
+        const text =
+          isApiError(error) && error.status === 413
+            ? "500'den fazla danışan var; yedek bu sürümde parçalı alınamıyor."
+            : errorMessage(error);
+        setImportMsg({ ok: false, text });
+      } finally {
+        setBackupBusy(null);
+      }
+      return;
+    }
+    const pwd = await requestExportAuth(type);
     if (!pwd) return;
     const { patientCount, measurementCount } = measureCounts();
     if (type === "json") {
@@ -413,46 +571,86 @@ export const SecurityPanel: React.FC<Props> = ({
         title="Danışan Verilerini Yedekle"
         description={
           IS_HTTP
-            ? "Sunucu tarafı yedekleme bu sürümde kapalı. Denetim kayıtları salt okunur olarak görüntülenebilir."
+            ? "Yedek sunucudan indirilir; içe aktarma yalnızca ekler (mevcut danışanlar korunur)."
             : "Tüm danışanlar ve ölçüm geçmişleri — dışa aktarın veya bir yedekten geri yükleyin."
         }
         icon={<Download size={15} />}
       >
+        <div className="card-actions">
+          <button
+            type="button"
+            className="btn btn-outline btn-small"
+            onClick={() => void performExport("json")}
+            disabled={backupBusy !== null}
+          >
+            <FileJson size={14} /> {backupBusy === "export-json" ? "İndiriliyor…" : "JSON İndir"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline btn-small"
+            onClick={() => void performExport("csv")}
+            disabled={backupBusy !== null}
+          >
+            <FileSpreadsheet size={14} /> {backupBusy === "export-csv" ? "İndiriliyor…" : "CSV İndir"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline btn-small"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={backupBusy !== null}
+          >
+            <Upload size={14} /> {backupBusy === "import" ? "Yükleniyor…" : "JSON Yükle"}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="visually-hidden"
+            onChange={handleImportFile}
+            aria-hidden="true"
+            tabIndex={-1}
+          />
+        </div>
         {IS_HTTP ? (
-          <p className="muted muted-spaced">
-            Yedek indirme/yükleme özelliği panelde geçici olarak gizlendi; danışan verileri sunucuda tutulur.
+          <p className="muted muted-tight">
+            Sunucu yedeği danışan ve ölçümleri içerir. İçe aktarma geri alınamaz; yedekteki danışanlar yeni
+            numaralarla eklenir.
           </p>
-        ) : (
-          <>
-            <div className="card-actions">
-              <button type="button" className="btn btn-outline btn-small" onClick={() => performExport("json")}>
-                <FileJson size={14} /> JSON İndir
-              </button>
-              <button type="button" className="btn btn-outline btn-small" onClick={() => performExport("csv")}>
-                <FileSpreadsheet size={14} /> CSV İndir
-              </button>
-              <button type="button" className="btn btn-outline btn-small" onClick={() => fileInputRef.current?.click()}>
-                <Upload size={14} /> JSON Yükle
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="application/json,.json"
-                className="visually-hidden"
-                onChange={handleImportFile}
-                aria-hidden="true"
-                tabIndex={-1}
-              />
-            </div>
-            {exported ? <p className="muted muted-spaced">{exported}</p> : null}
-            {importMsg ? (
-              <p className={classNames("muted-spaced", importMsg.ok ? "import-ok" : "field-error")} role="status">
-                {importMsg.text}
-              </p>
-            ) : null}
-          </>
-        )}
+        ) : null}
+        {exported ? <p className="muted muted-spaced">{exported}</p> : null}
+        {importMsg ? (
+          <p className={classNames("muted-spaced", importMsg.ok ? "import-ok" : "field-error")} role="status">
+            {importMsg.text}
+          </p>
+        ) : null}
       </SectionCard>
+
+      {IS_HTTP ? (
+        <SectionCard
+          title="Dışa Aktarım Denetim Kaydı"
+          description="Sunucuda tutulan son 100 dışa aktarım/içe aktarım kaydı."
+          icon={<ShieldCheck size={15} />}
+        >
+          {audit === null ? (
+            <p className="muted">Denetim kaydı yüklenemedi.</p>
+          ) : audit.length === 0 ? (
+            <p className="muted">Henüz dışa aktarım kaydı yok.</p>
+          ) : (
+            <ul className="scenario-list">
+              {audit.map((entry) => (
+                <li key={entry.id}>
+                  <span>
+                    {new Date(entry.created_at).toLocaleString("tr-TR")} ·{" "}
+                    {entry.type.toUpperCase()} · {entry.patient_count} danışan ·{" "}
+                    {entry.measurement_count} ölçüm
+                  </span>
+                  <span className="badge badge-slate">{entry.type}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </SectionCard>
+      ) : null}
 
       {showExportAuth && (
         <div className="modal-overlay" onClick={handleAuthCancel} role="dialog" aria-modal="true" aria-labelledby="export-auth-title">
