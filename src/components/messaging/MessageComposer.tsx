@@ -37,6 +37,14 @@ export const MESSAGE_TEMPLATES = [
   }
 ] as const;
 
+type ComposerTemplate = { id: string; label: string; text: string };
+
+const DEFAULT_COMPOSER_TEMPLATES: ComposerTemplate[] = MESSAGE_TEMPLATES.map((template) => ({
+  id: template.id,
+  label: template.label,
+  text: template.text
+}));
+
 interface PatientRef {
   id: number;
   name: string;
@@ -55,6 +63,7 @@ const isOutbound = (event: MobileEvent): boolean =>
 export const MessageComposer: React.FC<Props> = ({ patients, initialPatientId, onClose }) => {
   const [patientId, setPatientId] = React.useState<number>(() => initialPatientId ?? patients[0]?.id ?? 0);
   const [templateId, setTemplateId] = React.useState<string>("serbest");
+  const [templates, setTemplates] = React.useState<ComposerTemplate[]>(DEFAULT_COMPOSER_TEMPLATES);
   const [text, setText] = React.useState("");
   const [notice, setNotice] = React.useState<string | null>(null);
   const [version, setVersion] = React.useState(0);
@@ -69,6 +78,28 @@ export const MessageComposer: React.FC<Props> = ({ patients, initialPatientId, o
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
   }, [onClose]);
+
+  // http modunda şablonlar sunucudan gelir; istek düşerse sabit listeye dönülür.
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return undefined;
+    }
+    let alive = true;
+    void messagesApi
+      .sablonlar()
+      .then((list) => {
+        if (!alive || !Array.isArray(list) || list.length === 0) return;
+        setTemplates(
+          list.map((template) => ({ id: template.id, label: template.name, text: template.body }))
+        );
+      })
+      .catch(() => {
+        if (alive) setTemplates(DEFAULT_COMPOSER_TEMPLATES);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   React.useEffect(() => {
     if (!IS_HTTP) {
@@ -110,7 +141,7 @@ export const MessageComposer: React.FC<Props> = ({ patients, initialPatientId, o
 
   const applyTemplate = (id: string) => {
     setTemplateId(id);
-    const template = MESSAGE_TEMPLATES.find((item) => item.id === id);
+    const template = templates.find((item) => item.id === id);
     setText(template?.text ?? "");
   };
 
@@ -219,7 +250,7 @@ export const MessageComposer: React.FC<Props> = ({ patients, initialPatientId, o
               value={templateId}
               onChange={(event) => applyTemplate(event.target.value)}
             >
-              {MESSAGE_TEMPLATES.map((template) => (
+              {templates.map((template) => (
                 <option key={template.id} value={template.id}>
                   {template.label}
                 </option>

@@ -242,7 +242,7 @@ export const messagesApi = {
     return apiPost<{ id: string; readAt: string | null }>(`/panel/mesajlar/${id}/okundu`);
   },
   sablonlar() {
-    return apiGet<Array<{ id: string; name: string; body: string; isDefault?: boolean }>>("/panel/mesaj-sablonlari");
+    return apiGet<MessageTemplate[]>("/panel/mesaj-sablonlari");
   }
 };
 
