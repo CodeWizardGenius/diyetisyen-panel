@@ -5217,8 +5217,12 @@ const App: React.FC = () => {
     if (!IS_HTTP) {
       return;
     }
-    return subscribeServerData(() => setServerTick((tick) => tick + 1));
-  }, []);
+    return subscribeServerData(() => {
+      setServerTick((tick) => tick + 1);
+      // İçe aktarma / başka ekranlardan gelen danışan değişiklikleri listeye yansısın.
+      setPatients([...cache.patients]);
+    });
+  }, [setPatients]);
 
   /** Token yenilenemediğinde oturumu kapat. */
   React.useEffect(() => {
