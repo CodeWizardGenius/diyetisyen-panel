@@ -4,6 +4,10 @@ Diyetisyenler için danışan takibi, ölçüm geçmişi, diyet planı oluşturm
 
 > Veri kaynağı iki modludur: `VITE_API_MODE=http` gerçek `nutricare-backend` API'sine bağlanır; `VITE_API_MODE=mock` ise backend olmadan tarayıcı içi demo verisiyle çalışır. Ayrıntı ve taşınan anahtarlar: `docs/ENTEGRASYON-RAPORU.md`.
 
+> **Durum (2026-11-27):** 2. tur tamamlandı — sunucu yedeği/denetim kaydı, okunmamış aktivite sayacı,
+> randevu linki durumu, birleşik ayarlar, danışan özeti, sağlık verisi, plan ve mesaj şablonları API'ye bağlı.
+> Backend testleri 94/94; panel `tsc` ve http/mock derlemeleri temiz.
+
 ## API modları
 
 | Mod | Davranış |

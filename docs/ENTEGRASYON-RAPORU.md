@@ -1,9 +1,10 @@
 # Diyetisyen Paneli ↔ Backend Entegrasyon Raporu
 
-Tarih: 2026-11-21  
+Tarih: 2026-11-27  
 Kapsam: `diyetisyen-panel` istemcisinin `nutricare-backend` API'sine bağlanması.  
-Durum: **Kod entegrasyonu tamamlandı; `mock` modu korundu; üretim derlemesi ve backend testleri
-yeşil. Tarayıcıda kısmi kabul turu gerçek backend'e karşı tamamlandı (bkz. §4–§5).**
+Durum: **Kod entegrasyonu tamamlandı; 2. tur (A–I) uygulandı; `mock` modu korundu. Backend testleri
+94/94, panel tip kontrolü ve http/mock derlemeleri yeşil. Tarayıcı kabul turu gerçek backend'e karşı
+yapıldı (bkz. §9.3; iki senaryo kısmi).**
 
 ## 1. Mimari
 
@@ -40,34 +41,37 @@ src/api/
 | `dp_patient_notes` | `GET/PUT .../notlar` | ✅ |
 | `dp_patient_reminders` | `GET/PUT .../hatirlatmalar` | ✅ |
 | `dp_meal_grid_<id>` | `GET/PUT .../ogun-cizelgesi?planStart=` | ✅ |
-| `dp_mobile_events` | `GET /panel/aktiviteler`, `.../olaylar`, `.../zaman-cizelgesi` | ✅ (gösterim) |
+| `dp_mobile_events` | `GET /panel/aktiviteler`, `.../olaylar`, `.../zaman-cizelgesi`, `GET /panel/aktiviteler/okunmamis?since=` | ✅ (gösterim + sunucu okunmamış sayısı) |
 | `dp_appointments` | `GET/POST /panel/randevular`, `PATCH/DELETE /panel/randevular/{id}` | ✅ |
 | Çalışma saatleri / randevu ayarları | `GET/PUT /panel/calisma-saatleri`, `/panel/randevu-ayarlari` | ✅ |
-| `dp_patient_links` | `POST .../randevu-linki`, `/panel/randevu-talepleri` (+ onay/red) | ✅ link üretimi; mevcut linki listeleme yok |
+| `dp_patient_links` | `GET/POST .../randevu-linki`, `/panel/randevu-talepleri` (+ onay/red) | ✅ link durumu + üretim |
 | Herkese açık talep sayfası | `GET/POST /acik/randevu-talebi/{token}` | ✅ |
 | `dp_notifications` | `GET /panel/bildirimler`, `POST/{id}/okundu`, `POST /okundu`, `DELETE` | ✅ |
 | Mesajlar | `GET/POST .../mesajlar`, `POST /panel/mesajlar/{id}/okundu` | ✅ |
+| Mesaj şablonları | `GET /panel/mesaj-sablonlari` | ✅ sunucu şablonları; hata olursa sabit liste |
 | `dp_alert_rules_v1` | `GET/PUT /panel/uyari-kurallari` | ✅ |
 | `dp_alert_state_v1`, `dp_alert_dismissed_v1` | `GET /panel/uyarilar`, `POST .../coz`, `.../yoksay` | ✅ |
-| Dashboard / öncelik | `GET /panel/dashboard`, `/panel/oncelik` | ✅ sunucu verisi |
+| Dashboard / öncelik | `GET /panel/dashboard`, `/panel/oncelik` | ✅ sunucu verisi (etkin uyum = elle ?? hesaplanan) |
 | `dp_report_sent_v1` | `GET .../haftalik-rapor`, `POST .../gonder` | ✅ rapor sunucudan; gönderim durumu oturum içi |
-| `dp_clinic_settings_v1` | Bölüm uçları (aşağıda) | ✅ bölüm bölüm |
+| `dp_clinic_settings_v1` | `GET /panel/ayarlar` + bölüm `PUT` uçları | ✅ tek çağrı + bölüm bazlı uyarı |
 | KVKK / silme | `GET .../kvkk`, `POST .../silme-talebi`, `.../onayla` | ✅ |
-| `dp_export_audit_log`, yedek | Yedek uçları yok | ⚠️ http modunda gizlendi |
-| `dp_theme`, `dp_ui`, `dp_plan_patient` | — | ✅ istemcide kaldı |
+| Sağlık verisi | `GET .../saglik/riza`, `GET .../saglik` | ✅ rıza kapısı + 7/30 gün özeti |
+| Plan şablonları | `GET/POST /panel/plan-sablonlari`, `GET/PATCH/DELETE /{id}`, `POST /{id}/ata` | ✅ kaydet/yükle/ata/sil |
+| Danışan özeti | `GET .../ozet` | ✅ kart + not + hatırlatma tek istek |
+| `dp_export_audit_log`, yedek | `GET/POST /panel/yedek`, `GET /panel/disa-aktarimlar` | ✅ yedek + sunucu denetim kaydı |
+| `dp_theme`, `dp_ui`, `dp_plan_patient`, `dp_feed_last_read_at` | — | ✅ istemcide kaldı |
 
 ### Ayarlar
 
-`GET /panel/ayarlar` birleşik ucu yoktur; panel bölümleri paralel çağırıp birleştirir:
+`GET /panel/ayarlar` tek çağrıda profile/security/nutrition/notifications/schedule bölümlerini döner.
+Bölüm servisi yanıt vermezse ilgili bölüm `{ "status": "alınamadı" }` olur; panel o bölümde varsayılana
+düşer ve "Bu bölüm şu an yüklenemedi, tekrar deneyin" uyarısı gösterir.
 
-- Profil: `GET /panel/ben` + **`PUT /panel/ayarlar/profil`** (backend'e eklendi)
-- Güvenlik: **`PUT /panel/ayarlar/guvenlik`** (backend'e eklendi, `session_timeout_min`)
-- Beslenme: `GET/PUT /panel/ayarlar/beslenme`
-- Bildirim: `GET/PUT /panel/ayarlar/bildirimler`
-- Çalışma: `PUT /panel/ayarlar/calisma` + `GET /panel/calisma-saatleri`
-
-Bir bölüm hata verirse `Promise.allSettled` ile yalnız o bölüm varsayılana düşer; istek tümüyle
-düşmez.
+- Profil: `GET /panel/ayarlar` + `PUT /panel/ayarlar/profil` (profil okuma ayrıca `GET /panel/ben`)
+- Güvenlik: `PUT /panel/ayarlar/guvenlik` (`session_timeout_min`)
+- Beslenme: `PUT /panel/ayarlar/beslenme`
+- Bildirim: `PUT /panel/ayarlar/bildirimler`
+- Çalışma: `PUT /panel/ayarlar/calisma`
 
 ## 3. Backend'de yapılan sınırlı eklemeler
 
@@ -76,11 +80,11 @@ düşmez.
 | `PUT /panel/ayarlar/profil` | identity'ye eklendi; `dietitians` satırını günceller, `GET /panel/ben` genişletildi |
 | `PUT /panel/ayarlar/guvenlik` | identity'ye eklendi; `session_timeout_min` (5–180) migration'ı |
 | `PATCH /panel/olcumler/{id}` | tracking'e eklendi; yalnız gönderilen alanlar güncellenir, 404 kiracı kontrolü |
-| `GET /panel/ayarlar` birleşik | **backend'e eklenmedi**; panel bölümleri birleştirir (E3 kararı) |
-| `GET /panel/aktiviteler/okunmamis` | eklenmedi; okunmamış sayısı istemci `dp_feed_last_read_at` ile hesaplanır |
-| `GET .../randevu-linki` | eklenmedi; panelde yalnız yeni link üretimi var |
-| `GET .../ozet` | eklenmedi; kart + zaman çizelgesi birleştirilir |
-| `GET/POST /panel/yedek` | eklenmedi; http modunda yedek bölümü gizlendi |
+| `GET /panel/ayarlar` birleşik | ✅ backend'de var (identity); panel tek çağrı kullanır |
+| `GET /panel/aktiviteler/okunmamis?since=` | ✅ backend'de var (tracking); panel rozet sayısını sunucudan alır |
+| `GET .../randevu-linki` | ✅ backend'de var (appointment); panel aktif link durumunu gösterir |
+| `GET .../ozet` | ✅ backend'de var (patient); panel tek istekle kart+not+hatırlatma yükler |
+| `GET/POST /panel/yedek`, `GET /panel/disa-aktarimlar` | ✅ backend'de var (consent); panel yedekleme ve denetim kaydını kullanır |
 | CORS tek köken | `CORS_ORIGIN` virgülle ayrılmış listeye çevrildi; gateway testi eklendi |
 
 Ek backend değişiklikleri: `PatientSchema.compliance` nullable (veri yok = null), 84 test geçiyor,
@@ -143,14 +147,12 @@ davet) aynı API katmanından çağrılıyor ancak bu turda tek tek denenmedi.
   kaydetme, randevu talebi onaylama, dashboard/öncelik/aktivite, hata durumu ve `mock` modu gerçek
   backend'e karşı denendi. Ölçüm/not/plan/öğün çizelgesi/mesaj/bildirim/KVKK/davet akışları bu turda
   tek tek denenmedi.
-- **Yedek indirme/yükleme** http modunda gizli; `GET/POST /panel/yedek` backend'de yok.
-- **Mevcut randevu linkini listeleme** yok; her tıklamada yeni tek kullanımlık link üretilir.
+- **Yedek kapsamı:** sunucu yedeği danışan + ölçüm içerir; plan/not/hatırlatma/öğün çizelgesi taşınmaz.
 - **Uyarı yeniden açma** sunucuda yok; koşul sürüyorsa motor uyarıyı kendisi yeniden açar.
 - **Dashboard 7 günlük grafikleri** istemcideki öğün çizelgesi verisinden üretiliyor; sunucu
   dashboard'u yalnız özet/öncelik/uyarı/aktivite sağlar. http modunda öğün verisi yokken artık
   sahte "örnek veri" yerine boş durum metni gösterilir (§8).
-- **Mesaj şablonları** panelin sabit listesinden gelir; sunucu `GET /panel/mesaj-sablonlari`
-  özel şablonları da döndürür ancak panel şu an sabitleri kullanıyor.
+- **Sağlık verisi** yalnız danışanın mobil rızası varsa gösterilir; rıza yoksa panel veri istemez.
 - **Paket/ödeme alanları** patient DTO'sunda opsiyonel; formdan temizleme gönderilmiyor.
 - **Refresh token** `sessionStorage`'da; sekme kapanınca oturum biter (bilinçli XSS azaltması).
 
@@ -220,11 +222,67 @@ Doğrulama: panel `npx tsc --noEmit` temiz; üç derleme modu beklendiği gibi; 
 
 ### Hâlâ açık (bu turun kapsamı dışı)
 
-- **Ortalama uyum ve öncelik:** insight yalnız mobil öğün olaylarından hesaplanan uyumu kullanıyor; elle girilen
-  uyumu (`complianceManual`) dikkate almıyor. Karar 6.3'e ("etkin değer = manual ?? computed") göre insight
-  düzeltilmeli. Ayrıca yerel insight okuma modelinde eski bir duman testinden kalan `id: 0`, adı "Danışan" olan
-  kayıt öncelik listesinde görünüyor (yerel test verisi).
+- **Ortalama uyum ve öncelik:** ✅ §9'da çözüldü; insight artık etkin uyumu (`manual ?? computed`) kullanıyor.
+  Yerel `id: 0` / "Danışan" duman testi kaydı yerel veritabanından temizlendi.
 - **Ağ kesikken sayfa yenileme:** giriş ekranı görünür; yenileme token'ı silinmez, bağlantı dönünce sayfa
   yenilenince oturum geri gelir.
 - **Kısa TTL ile sessiz yenileme ve çevrimdışı senaryosu** (madde 6) tarayıcıda simüle edilmedi; mantık kod incelemesiyle doğrulandı.
 - Backend 2. tur eksikleri (`BACKEND-EKSIKLER-2-PROMPT.md`) ve canlı (tünel) yayının güncellenmesi bekliyor.
+
+## 9. 2. tur (`PANEL-ENTEGRASYON-2-PROMPT.md`, 2026-11-27)
+
+### 9.1 Değişen dosyalar
+
+| Dosya | Değişiklik |
+|---|---|
+| `src/api/types.ts` | Yedek/denetim, randevu linki durumu, sağlık, danışan özeti, plan ve mesaj şablonu tipleri |
+| `src/api/endpoints.ts` | `backupApi`, `healthApi`, `plansApi` şablon uçları, `appointmentsApi.linkDurumu`, `trackingApi.okunmamis`; `settingsApi.tumu` artık `GET /panel/ayarlar` kullanır |
+| `src/api/cache.ts` | `settingsUnavailable`, `planTemplates`, `healthByPatient` |
+| `src/api/bootstrap.ts` | Danışan detayı `GET .../ozet` ile; plan şablonları ön yükleme; birleşik ayarlar |
+| `src/components/settings/panels/SecurityPanel.tsx` | Sunucu yedeği indir/yükle, CSV istemcide, sunucu denetim kaydı listesi |
+| `src/components/settings/useSettings.ts`, `SettingsView.tsx` | Birleşik ayarlar + bölüm bazlı "yüklenemedi" uyarısı ve tekrar dene |
+| `src/components/dashboard/ActivityFeed.tsx` | Okunmamış sayısı `GET /panel/aktiviteler/okunmamis`, 99+ rozet, hata halinde gizleme |
+| `src/components/messaging/MessageComposer.tsx` | Mesaj şablonları sunucudan; hata halinde sabit liste |
+| `src/components/reports/WeeklyReport.tsx` | Elle girilen uyum etiketi |
+| `src/App.tsx` | Randevu linki durumu; Sağlık sekmesi; plan şablonu kaydet/yükle/ata/sil; danışan özeti sonrası liste tazeleme |
+| `nutricare-backend/services/insight/migrations/002_insight_manual_compliance.sql` | `patient_metrics.compliance_manual` |
+| `nutricare-backend/services/insight/src/engine.ts`, `app.ts` | Etkin uyum = `manual ?? computed`; dashboard/öncelik/uyarı/rapor |
+| `nutricare-backend/services/patient/src/app.ts` | `patient.*` olayına `complianceManual` |
+| `nutricare-backend/packages/contracts/src/events.ts` | Olay şemasına `complianceManual` |
+| `nutricare-backend/test/integration.test.ts` | Etkin uyum testleri + migration |
+
+### 9.2 Kararlar
+
+- Yedek içe aktarma **yalnızca ekler**; panel bunu onay metninde ve sonuç mesajında açıkça söyler.
+- CSV dışa aktarımı yeni backend ucu açmadan, `GET /panel/yedek` yanıtından istemcide üretilir.
+- Danışan detayında kart/not/hatırlatma `GET .../ozet` ile tek istekte gelir; ölçüm/plan/çizelge/mesaj ayrı kalır.
+- Sağlık sekmesi rıza yoksa veri istemez; rıza varsa son 7/30 gün adım/uyku/nabız özeti gösterir.
+- Plan şablonları http modunda sunucudadır; mock modundaki yerel kopyalama davranışı korunur.
+- Insight etkin uyumu tek yerde (`effectiveCompliance`) hesaplar; haftalık raporda elle değer varsa `compliance.score` ona döner ve `source: "manual"` işaretlenir.
+
+### 9.3 Doğrulama
+
+| # | Kontrol | Sonuç | Kanıt |
+|---|---|---|---|
+| 1 | A: yedek indir/yükle | ✅ | `GET /panel/yedek` 200 → JSON/CSV indi; aynı dosya yüklendi → "1 danışan ve 0 ölçüm eklendi"; denetim listesinde iki yeni kayıt; içe aktarılan kopya sonra silindi |
+| 2 | B: okunmamış rozeti | ✅ | `GET /panel/aktiviteler/okunmamis?since=...` 200; hesapta olay olmadığı için sayı 0 ve rozet gizli; `since` geri alınınca da sunucuyla aynı |
+| 3 | C: randevu linki durumu | ✅ | İlk açılışta "Link üret"; `POST` sonrası ham link bir kez; sayfa yenilenince `GET` 200 → "Aktif link var — 27.11.2026 … / 28.11.2026 …" + "Yeni link üret" |
+| 4 | D: birleşik ayarlar | ✅ (kısmi) | Ayarlar açılışında yalnız `GET /panel/ayarlar` 200; `beslenme` bölüm çağrısı 0. Servis düşürme senaryosu bu turda denenmedi; `status: "alınamadı"` dalı ve uyarı UI'ı kodda hazır |
+| 5 | E: danışan özeti | ✅ | Çekmece açılışında `GET /panel/danisanlar/1/ozet` 200; `notlar`/`hatirlatmalar` GET'i yok |
+| 6 | F: sağlık verisi | ✅ (kısmi) | Rızasız danışanda "izin vermedi" metni; `GET .../saglik` çağrılmadı. Rızalı/verili danışan bu yerel veride yok; grafik dalı kod incelemesiyle doğrulandı |
+| 7 | G: plan şablonları | ✅ | `POST` 201 → listede; `POST /{id}/ata` 200 + `PATCH /panel/danisanlar/1` 200; `DELETE` 204 → liste boş |
+| 8 | H: mesaj şablonları | ✅ | `GET /panel/mesaj-sablonlari` 200; şablon seçenekleri sunucudan geldi |
+| 9 | I: etkin uyum | ✅ | Backend testleri: elle 40/hesap null → 40; elle null/hesap 80 → 80; elle 82/hesap 83 → 82; öncelik ve uyum uyarısı 40'ı kullandı |
+| 10 | mock modu | ✅ | `VITE_API_MODE=mock npm run build` geçti; yedek/mesaj/link dalları eski davranışta |
+| 11 | Tip/derleme/localStorage | ✅ | `npx tsc --noEmit` temiz; http ve mock derlemeleri geçti; http modunda `localStorage` yalnız `dp_plan_*`, `dp_feed_last_read_at` |
+
+Backend: `corepack pnpm typecheck`, `lint`, `test` (**94/94, atlanan 0**) ve `openapi:check` (**109 uç**) temiz.
+Yerel insight veritabanına `002_insight_manual_compliance.sql` uygulandı; `id: 0` / "Danışan" duman testi kaydı
+bu yerel veritabanında bulunmadı (daha önce temizlenmiş).
+
+### 9.4 Bilinen sınırlar
+
+- Sağlık verisi grafiği rızalı gerçek veriyle bu turda görsel olarak denenmedi.
+- Ayarlar bölüm hatası, bir servis kasıtlı durdurularak denenmedi; birleşik uç ve kod dalı doğrulandı.
+- Yedek danışan + ölçüm kapsamındadır; plan/not/hatırlatma/öğün çizelgesi taşınmaz.
+- Yerel test sırasında oluşturulan randevu linki ve denetim kayıtları veritabanında kaldı; danışan kopyası silindi.
