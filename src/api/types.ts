@@ -136,7 +136,14 @@ export type WeeklyReportData = {
   weekStart: string;
   weekEnd: string;
   rangeLabel: string;
-  compliance: { score: number | null; meals: number; compliant: number; partial: number; offPlan: number };
+  compliance: {
+    score: number | null;
+    meals: number;
+    compliant: number;
+    partial: number;
+    offPlan: number;
+    source?: "manual" | "computed" | "none";
+  };
   trend: number | null;
   previousScore: number | null;
   waterAvgMl: number | null;
@@ -202,4 +209,120 @@ export type SessionResult = {
   refreshToken: string;
   user?: { id?: string; email?: string; name?: string; title?: string; clinicName?: string } | string;
   expiresAt: string;
+};
+
+/* ------------------------------ 2. tur eklemeleri ---------------------------- */
+
+export type AppointmentLinkState = {
+  active: boolean;
+  createdAt?: string;
+  expiresAt?: string;
+};
+
+export type BackupPatient = Patient & {
+  heightCm?: number | null;
+  weightKg?: number | null;
+  age?: number | null;
+  sex?: "kadin" | "erkek" | null;
+  measurements?: Array<{
+    date: string;
+    weightKg?: number | null;
+    heightCm?: number | null;
+    bodyFatPercentage?: number | null;
+    muscleMassKg?: number | null;
+    waistCm?: number | null;
+    hipCm?: number | null;
+    notes?: string;
+  }>;
+};
+
+export type BackupPayload = {
+  version: number;
+  exportedAt: string;
+  patients: BackupPatient[];
+};
+
+export type BackupImportResult = {
+  patientsCreated: number;
+  measurementsCreated: number;
+};
+
+export type ExportAuditEntry = {
+  id: string;
+  type: string;
+  patient_count: number;
+  measurement_count: number;
+  created_at: string;
+};
+
+export type PatientSummary = {
+  patient: Patient;
+  notes: { body: string; updatedAt: string | null } | null;
+  reminders: Record<string, string>;
+};
+
+export type HealthConsent = {
+  danisanId: number;
+  status: "granted" | "revoked";
+  turler: Record<string, boolean>;
+  zamanDamgasi: string;
+};
+
+export type HealthRecord = {
+  id: string;
+  danisanId: number;
+  kaynak: string;
+  cihazAdi: string | null;
+  cihazTuru: string | null;
+  kaynakUygulama?: string | null;
+  kaynakUygulamaAdi?: string | null;
+  disKayitId: string | null;
+  zamanDamgasi: string;
+  bitis: string | null;
+  alinmaZamani: string;
+  toplam?: boolean;
+  tur: string;
+  deger: Record<string, unknown>;
+};
+
+export type HealthData = {
+  riza: HealthConsent | null;
+  sonSenkron: string | null;
+  kayitlar: HealthRecord[];
+};
+
+export type PlanTemplateItem = {
+  id?: string;
+  mealSlot?: string;
+  label: string;
+  calories: number;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+};
+
+export type PlanTemplate = {
+  id: string;
+  name: string;
+  notes: string;
+  repeatEvery: number;
+  repeatUnit: string;
+  targetCalories: number;
+  macros: MacroSplit;
+  goal: "verme" | "koruma" | "alma";
+  activityLevel: "sedanter" | "hafif" | "orta" | "aktif" | "cokAktif";
+  bmrFormula: "mifflin" | "harris";
+  hydrationMlPerKg: number;
+  items: PlanTemplateItem[];
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+export type PlanTemplateInput = Omit<PlanTemplate, "id" | "createdAt" | "updatedAt">;
+
+export type MessageTemplate = {
+  id: string;
+  name: string;
+  body: string;
+  isDefault?: boolean;
 };

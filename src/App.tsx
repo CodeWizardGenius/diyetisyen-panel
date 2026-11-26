@@ -102,12 +102,17 @@ import {
 import type {
   Appointment,
   AppointmentDraft,
+  AppointmentLinkState,
   AppointmentRequest,
   AppointmentStatus,
+  HealthConsent,
+  HealthData,
+  HealthRecord,
   Measurement,
   MealGridState,
   PatientDraft,
   PlanItem,
+  PlanTemplate,
   SavedPatientPlan
 } from "./api/types";
 import {
