@@ -13,8 +13,11 @@ export {
   notificationsApi,
   settingsApi,
   consentApi,
+  healthApi,
+  backupApi,
   publicApi,
-  type NotificationsResult
+  type NotificationsResult,
+  type SettingsBundle
 } from "./endpoints";
 export { cache, subscribeServerData, notifyServerData, resetServerCache, mealGridKey, isPatientLoaded } from "./cache";
 export { bootstrapCore, hydratePatient } from "./bootstrap";

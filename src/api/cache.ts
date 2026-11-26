@@ -44,7 +44,10 @@ export type ServerCache = {
   consentByPatient: Record<number, KvkkState>;
   messagesByPatient: Record<number, Message[]>;
   settings: ClinicSettings | null;
+  settingsUnavailable: string[];
   me: Me | null;
+  planTemplates: PlanTemplate[];
+  healthByPatient: Record<number, HealthData>;
   weeklyReports: Record<string, WeeklyReportData>;
   loadedPatients: Set<number>;
 };
@@ -69,7 +72,10 @@ const emptyCache = (): ServerCache => ({
   consentByPatient: {},
   messagesByPatient: {},
   settings: null,
+  settingsUnavailable: [],
   me: null,
+  planTemplates: [],
+  healthByPatient: {},
   weeklyReports: {},
   loadedPatients: new Set<number>()
 });

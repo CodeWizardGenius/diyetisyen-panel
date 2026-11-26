@@ -36,17 +36,29 @@ export async function bootstrapCore(): Promise<{ patientsOk: boolean; settings: 
     insightApi.uyarilar("cozulmus"),
     insightApi.oncelik(),
     insightApi.dashboard(),
-    insightApi.kurallar()
+    insightApi.kurallar(),
+    plansApi.sablonlar()
   ]);
 
-  const [patients, me, appointments, notifications, activities, activeAlerts, resolvedAlerts, priority, dashboard, rules] =
-    tasks;
+  const [
+    patients,
+    me,
+    appointments,
+    notifications,
+    activities,
+    activeAlerts,
+    resolvedAlerts,
+    priority,
+    dashboard,
+    rules,
+    planTemplates
+  ] = tasks;
 
   if (patients.status === "fulfilled") cache.patients = patients.value;
   if (me.status === "fulfilled") cache.me = me.value;
 
   const profile = me.status === "fulfilled" ? me.value : null;
-  const settings = await settingsApi.tumu(DEFAULT_SETTINGS, {
+  const bundle = await settingsApi.tumu(DEFAULT_SETTINGS, {
     dietitianName: profile?.name ?? DEFAULT_SETTINGS.profile.dietitianName,
     title: profile?.title ?? DEFAULT_SETTINGS.profile.title,
     clinicName: profile?.clinicName ?? DEFAULT_SETTINGS.profile.clinicName,
@@ -55,10 +67,13 @@ export async function bootstrapCore(): Promise<{ patientsOk: boolean; settings: 
     diplomaNo: profile?.diplomaNo ?? DEFAULT_SETTINGS.profile.diplomaNo,
     footerText: profile?.footerText ?? DEFAULT_SETTINGS.profile.footerText
   });
+  const settings = bundle.settings;
   if (profile?.sessionTimeoutMin) {
     settings.security = { sessionTimeoutMin: profile.sessionTimeoutMin };
   }
   cache.settings = settings;
+  cache.settingsUnavailable = bundle.unavailable;
+  if (planTemplates.status === "fulfilled") cache.planTemplates = planTemplates.value ?? [];
 
   if (appointments.status === "fulfilled") cache.appointments = appointments.value;
   if (notifications.status === "fulfilled") {

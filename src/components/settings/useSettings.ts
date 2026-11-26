@@ -21,6 +21,10 @@ export interface UseSettingsResult {
   save: () => void;
   resetDefaults: () => void;
   toast: string | null;
+  /** Sunucudan yüklenemeyen bölümler (http modu). */
+  unavailable: string[];
+  /** Birleşik ayarları yeniden dener. */
+  reload: () => void;
 }
 
 /**
@@ -30,6 +34,7 @@ export interface UseSettingsResult {
 export const useSettings = (): UseSettingsResult => {
   const [settings, setSettings] = React.useState<ClinicSettings>(() => loadSettings());
   const [draft, setDraft] = React.useState<ClinicSettings>(() => loadSettings());
+  const [unavailable, setUnavailable] = React.useState<string[]>(() => [...cache.settingsUnavailable]);
   const [toast, setToast] = React.useState<string | null>(null);
   const toastTimer = React.useRef<number | undefined>(undefined);
 
@@ -41,6 +46,7 @@ export const useSettings = (): UseSettingsResult => {
       const server = loadSettings();
       setSettings(server);
       setDraft(server);
+      setUnavailable([...cache.settingsUnavailable]);
     });
   }, []);
 
@@ -118,5 +124,24 @@ export const useSettings = (): UseSettingsResult => {
     showToast("Ayarlar varsayılanlara sıfırlandı.");
   }, [showToast]);
 
-  return { settings, draft, updateDraft, isDirty, save, resetDefaults, toast };
+  const reload = React.useCallback(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    void settingsApi
+      .tumu(loadSettings(), {})
+      .then((bundle) => {
+        cache.settings = bundle.settings;
+        cache.settingsUnavailable = bundle.unavailable;
+        notifyServerData();
+        showToast(
+          bundle.unavailable.length > 0
+            ? "Bazı bölümler şu an yüklenemedi; tekrar deneyin."
+            : "Ayarlar sunucudan yenilendi."
+        );
+      })
+      .catch((error: unknown) => showToast(errorMessage(error)));
+  }, [showToast]);
+
+  return { settings, draft, updateDraft, isDirty, save, resetDefaults, toast, unavailable, reload };
 };

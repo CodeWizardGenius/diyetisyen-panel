@@ -98,7 +98,7 @@ export const SettingsView: React.FC<Props> = ({
   onImportData,
   initialSection
 }) => {
-  const { draft, updateDraft, isDirty, save, resetDefaults, toast } = useSettings();
+  const { draft, updateDraft, isDirty, save, resetDefaults, toast, unavailable, reload } = useSettings();
   const [section, setSection] = React.useState<SettingsSectionKey>(initialSection ?? "profil");
 
   // Ayarlar açıkken başka bir sayfadan bölüm bağlantısıyla gelinirse o bölüme geç.
@@ -155,6 +155,16 @@ export const SettingsView: React.FC<Props> = ({
         ) : null}
 
         <div className="settings-panels">
+          {unavailable.includes(section) ? (
+            <div className="card section-warning" role="status">
+              <p className="muted">
+                Bu bölüm şu an yüklenemedi. Varsayılan değerler gösteriliyor; tekrar deneyin.
+              </p>
+              <button type="button" className="btn btn-outline btn-small" onClick={reload}>
+                <RotateCcw size={14} /> Tekrar dene
+              </button>
+            </div>
+          ) : null}
           {section === "profil" ? <ProfilePanel draft={draft} updateSection={updateSection} /> : null}
           {section === "beslenme" ? <NutritionPanel draft={draft} updateSection={updateSection} /> : null}
           {section === "bildirim" ? (

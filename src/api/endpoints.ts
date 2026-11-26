@@ -308,7 +308,84 @@ export const notificationsApi = {
 
 /* ---------------------------------- ayarlar -------------------------------- */
 
+type SettingsSection<T> = T | { status: "alınamadı"; error?: string };
+
+type UnifiedSettingsResponse = {
+  profile: ClinicSettings["profile"];
+  security: ClinicSettings["security"];
+  nutrition: SettingsSection<NutritionSettings>;
+  notifications: SettingsSection<NotificationSettings>;
+  schedule: SettingsSection<ScheduleSettings>;
+};
+
+export type SettingsBundle = {
+  settings: ClinicSettings;
+  /** Sunucudan "alınamadı" dönen (veya istekte düşen) bölümler. */
+  unavailable: SettingsSectionKey[];
+};
+
+const isUnavailable = (value: unknown): boolean =>
+  Boolean(
+    value &&
+      typeof value === "object" &&
+      (value as { status?: unknown }).status !== undefined &&
+      (value as { status?: string }).status === "alınamadı"
+  );
+
 export const settingsApi = {
+  /** Birleşik ayarlar: tek istek; bölüm bazında hata bilgisi döner. */
+  async tumu(
+    fallback: ClinicSettings,
+    profile: Partial<ClinicSettings["profile"]>
+  ): Promise<SettingsBundle> {
+    const unavailable: SettingsSectionKey[] = [];
+    let server: UnifiedSettingsResponse | null = null;
+    try {
+      server = await apiGet<UnifiedSettingsResponse>("/panel/ayarlar");
+    } catch {
+      server = null;
+    }
+
+    if (!server) {
+      // Tek çağrı düşerse bölüm uçlarına ayrı ayrı düşmek yerine varsayılana dön;
+      // kullanıcıya her bölümde "yüklenemedi" uyarısı gösterilir.
+      return {
+        settings: {
+          ...fallback,
+          profile: { ...fallback.profile, ...profile }
+        },
+        unavailable: ["profil", "beslenme", "bildirim", "calisma", "guvenlik"]
+      };
+    }
+
+    const nutrition = isUnavailable(server.nutrition)
+      ? (unavailable.push("beslenme"), fallback.nutrition)
+      : (server.nutrition as NutritionSettings);
+    const notifications = isUnavailable(server.notifications)
+      ? (unavailable.push("bildirim"), fallback.notifications)
+      : (server.notifications as NotificationSettings);
+    const scheduleRaw = server.schedule;
+    const schedule = isUnavailable(scheduleRaw)
+      ? (unavailable.push("calisma"), fallback.schedule)
+      : {
+          ...fallback.schedule,
+          ...(scheduleRaw as Partial<ScheduleSettings>),
+          workingDays: Array.isArray((scheduleRaw as ScheduleSettings).workingDays)
+            ? (scheduleRaw as ScheduleSettings).workingDays
+            : fallback.schedule.workingDays
+        };
+
+    return {
+      settings: {
+        profile: { ...fallback.profile, ...profile, ...(server.profile ?? {}) },
+        security: { ...fallback.security, ...(server.security ?? {}) },
+        nutrition,
+        notifications,
+        schedule
+      },
+      unavailable
+    };
+  },
   profil(body: ClinicSettings["profile"]) {
     return apiPut<ClinicSettings["profile"]>("/panel/ayarlar/profil", body);
   },
@@ -329,30 +406,31 @@ export const settingsApi = {
   },
   calisma(body: ScheduleSettings) {
     return apiPut<ScheduleSettings>("/panel/ayarlar/calisma", body);
+  }
+};
+
+/* ---------------------------------- sağlık --------------------------------- */
+
+export const healthApi = {
+  riza(patientNo: number) {
+    return apiGet<HealthConsent | null>(`/panel/danisanlar/${patientNo}/saglik/riza`);
   },
-  /** Bölüm uçlarını paralel çağırıp birleştirir; hata veren bölüm varsayılanla döner. */
-  async tumu(fallback: ClinicSettings, profile: Partial<ClinicSettings["profile"]>): Promise<ClinicSettings> {
-    const [nutrition, notifications, workingDays, appointment] = await Promise.allSettled([
-      settingsApi.beslenme(),
-      settingsApi.bildirimler(),
-      appointmentsApi.calismaSaatleri(),
-      appointmentsApi.randevuAyarlari()
-    ]);
-    return {
-      profile: { ...fallback.profile, ...profile },
-      nutrition: nutrition.status === "fulfilled" ? nutrition.value : fallback.nutrition,
-      notifications: notifications.status === "fulfilled" ? notifications.value : fallback.notifications,
-      schedule: {
-        workingDays:
-          workingDays.status === "fulfilled" && Array.isArray(workingDays.value)
-            ? workingDays.value
-            : fallback.schedule.workingDays,
-        defaultDurationMin:
-          appointment.status === "fulfilled" ? appointment.value.defaultDurationMin : fallback.schedule.defaultDurationMin,
-        bufferMin: appointment.status === "fulfilled" ? appointment.value.bufferMin : fallback.schedule.bufferMin
-      },
-      security: { ...fallback.security }
-    };
+  veri(patientNo: number) {
+    return apiGet<HealthData>(`/panel/danisanlar/${patientNo}/saglik`);
+  }
+};
+
+/* ------------------------------ yedek / denetim ---------------------------- */
+
+export const backupApi = {
+  indir() {
+    return apiGet<BackupPayload>("/panel/yedek");
+  },
+  yukle(payload: BackupPayload) {
+    return apiPost<BackupImportResult>("/panel/yedek", payload);
+  },
+  denetim() {
+    return apiGet<ExportAuditEntry[]>("/panel/disa-aktarimlar");
   }
 };
 
