@@ -85,11 +85,10 @@ export async function bootstrapCore(): Promise<{ patientsOk: boolean; settings: 
 export async function hydratePatient(patientNo: number, planStartDate?: string): Promise<void> {
   const patient = cache.patients.find((item) => item.id === patientNo);
   const planStart = planStartDate ?? patient?.startDate ?? isoDay();
-  const [measurements, plan, notes, reminders, grid, events, timeline, consent, messages] = await Promise.allSettled([
+  const [measurements, plan, summary, grid, events, timeline, consent, messages] = await Promise.allSettled([
     measurementsApi.listele(patientNo),
     plansApi.getir(patientNo),
-    patientsApi.notlar(patientNo),
-    patientsApi.hatirlatmalar(patientNo),
+    patientsApi.ozet(patientNo),
     trackingApi.ogunCizelgesi(patientNo, planStart),
     trackingApi.olaylar(patientNo),
     trackingApi.zamanCizelgesi(patientNo, 0),
@@ -99,8 +98,14 @@ export async function hydratePatient(patientNo: number, planStartDate?: string):
 
   if (measurements.status === "fulfilled") cache.measurements[patientNo] = measurements.value ?? [];
   if (plan.status === "fulfilled") cache.plans[patientNo] = plan.value;
-  if (notes.status === "fulfilled") cache.notes[patientNo] = notes.value?.body ?? "";
-  if (reminders.status === "fulfilled") cache.reminders[patientNo] = reminders.value ?? {};
+  if (summary.status === "fulfilled") {
+    const value = summary.value;
+    cache.notes[patientNo] = value.notes?.body ?? "";
+    cache.reminders[patientNo] = value.reminders ?? {};
+    if (value.patient) {
+      cache.patients = cache.patients.map((item) => (item.id === patientNo ? value.patient : item));
+    }
+  }
   if (grid.status === "fulfilled") {
     cache.mealGrids[`${patientNo}:${planStart}`] = Array.isArray(grid.value) && grid.value.length > 0 ? grid.value : emptyGrid();
   }

@@ -47,6 +47,9 @@ export const patientsApi = {
   notlar(patientNo: number) {
     return apiGet<{ body: string; updatedAt: string | null }>(`/panel/danisanlar/${patientNo}/notlar`);
   },
+  ozet(patientNo: number) {
+    return apiGet<PatientSummary>(`/panel/danisanlar/${patientNo}/ozet`);
+  },
   notKaydet(patientNo: number, body: string) {
     return apiPut<{ body: string; updatedAt: string }>(`/panel/danisanlar/${patientNo}/notlar`, { body });
   },
