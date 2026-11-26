@@ -192,6 +192,9 @@ export const appointmentsApi = {
     return apiPost<{ token: string; patientId: number; expiresAt: string; url: string }>(
       `/panel/danisanlar/${patientNo}/randevu-linki`
     );
+  },
+  linkDurumu(patientNo: number) {
+    return apiGet<AppointmentLinkState>(`/panel/danisanlar/${patientNo}/randevu-linki`);
   }
 };
 

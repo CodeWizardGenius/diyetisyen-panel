@@ -3643,11 +3643,34 @@ const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
   const bmi = latest ? calculateBMI(asNumber(latest.weightKg), asNumber(latest.heightCm)) : 0;
 
   const [serverLink, setServerLink] = React.useState<string | null>(null);
+  const [linkState, setLinkState] = React.useState<AppointmentLinkState | null>(null);
+  const [linkError, setLinkError] = React.useState<string | null>(null);
   const [linkBusy, setLinkBusy] = React.useState(false);
   const [inviteToken, setInviteToken] = React.useState<string | null>(null);
   const [inviteBusy, setInviteBusy] = React.useState(false);
   const requestLink = IS_HTTP ? (serverLink ?? "") : buildAppointmentRequestUrl(patient.id);
   const [copied, setCopied] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return undefined;
+    }
+    let alive = true;
+    setLinkState(null);
+    setLinkError(null);
+    setServerLink(null);
+    void appointmentsApi
+      .linkDurumu(patient.id)
+      .then((state) => {
+        if (alive) setLinkState(state);
+      })
+      .catch((error: unknown) => {
+        if (alive) setLinkError(errorMessage(error));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [patient.id]);
 
   const createInvite = () => {
     setInviteBusy(true);
@@ -3660,10 +3683,14 @@ const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
 
   const createLink = () => {
     setLinkBusy(true);
+    setLinkError(null);
     void appointmentsApi
       .linkOlustur(patient.id)
-      .then((result) => setServerLink(result.url))
-      .catch((error: unknown) => showToast(errorMessage(error), "error"))
+      .then((result) => {
+        setServerLink(result.url);
+        setLinkState({ active: true, createdAt: new Date().toISOString(), expiresAt: result.expiresAt });
+      })
+      .catch((error: unknown) => setLinkError(errorMessage(error)))
       .finally(() => setLinkBusy(false));
   };
 
@@ -3741,15 +3768,35 @@ const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
         </p>
         <div className="patient-link-row">
           {IS_HTTP && !serverLink ? (
-            <button type="button" className="btn btn-primary btn-small" onClick={createLink} disabled={linkBusy}>
-              {linkBusy ? "Oluşturuluyor…" : "Tek kullanımlık bağlantı oluştur"}
-            </button>
+            <>
+              {linkState?.active ? (
+                <p className="muted muted-tight">
+                  Aktif link var —{" "}
+                  {linkState.createdAt ? new Date(linkState.createdAt).toLocaleString("tr-TR") : "—"} tarihinde
+                  oluşturuldu,{" "}
+                  {linkState.expiresAt ? new Date(linkState.expiresAt).toLocaleString("tr-TR") : "—"} tarihine kadar
+                  geçerli.
+                </p>
+              ) : null}
+              <button type="button" className="btn btn-primary btn-small" onClick={createLink} disabled={linkBusy}>
+                {linkBusy ? "Oluşturuluyor…" : linkState?.active ? "Yeni link üret" : "Link üret"}
+              </button>
+              {linkState?.active ? (
+                <p className="muted muted-tight">Yeni link öncekinin yerine geçer; eski bağlantı geçersiz olur.</p>
+              ) : null}
+              {linkError ? <p className="field-error">{linkError}</p> : null}
+            </>
           ) : (
             <>
               <code className="patient-link-code" title={requestLink}>{requestLink}</code>
               <button type="button" className="btn btn-outline btn-small patient-link-copy" onClick={copyRequestLink}>
                 {copied ? "Kopyalandı ✓" : "Bağlantıyı Kopyala"}
               </button>
+              {IS_HTTP ? (
+                <p className="muted muted-tight">
+                  Ham bağlantı yalnızca oluşturulduğu anda gösterilir; sayfa yenilenirse yeniden üretmeniz gerekir.
+                </p>
+              ) : null}
             </>
           )}
         </div>
