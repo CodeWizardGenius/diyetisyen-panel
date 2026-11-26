@@ -104,7 +104,35 @@ export const plansApi = {
     return apiPut<SavedPatientPlan>(`/panel/danisanlar/${patientNo}/plan`, plan);
   },
   sablonlar() {
-    return apiGet<Array<{ id: string; name: string }>>("/panel/plan-sablonlari");
+    return apiGet<PlanTemplate[]>("/panel/plan-sablonlari");
+  },
+  sablonGetir(id: string) {
+    return apiGet<PlanTemplate>(`/panel/plan-sablonlari/${id}`);
+  },
+  sablonKaydet(input: PlanTemplateInput) {
+    return apiPost<PlanTemplate>("/panel/plan-sablonlari", input);
+  },
+  sablonGuncelle(id: string, patch: Partial<PlanTemplateInput>) {
+    return apiPatch<PlanTemplate>(`/panel/plan-sablonlari/${id}`, patch);
+  },
+  sablonSil(id: string) {
+    return apiDelete<void>(`/panel/plan-sablonlari/${id}`);
+  },
+  sablonAta(
+    id: string,
+    patientNo: number,
+    options: {
+      targetCalories?: number;
+      macros?: { carbsPct: number; proteinPct: number; fatPct: number };
+      goal?: "verme" | "koruma" | "alma";
+      startDate?: string;
+      endDate?: string;
+      waterTargetMl?: number;
+    } = {}
+  ) {
+    return apiPost<{ atanan: number }>(`/panel/plan-sablonlari/${id}/ata`, {
+      atamalar: [{ patientNo, ...options }]
+    });
   }
 };
 

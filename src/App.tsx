@@ -2180,6 +2180,10 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
   const [savedMsg, setSavedMsg] = React.useState<string | null>(null);
   const [copyOpen, setCopyOpen] = React.useState(false);
   const [copyName, setCopyName] = React.useState("");
+  const [planTemplates, setPlanTemplates] = React.useState<PlanTemplate[]>(() =>
+    IS_HTTP ? cache.planTemplates : []
+  );
+  const [templateBusy, setTemplateBusy] = React.useState<string | null>(null);
 
   // Danışan değişince kayıtlı planını ve son ölçümünü yükle. İlk açılışta çalışmaz:
   // kaydedilmemiş taslak (dp_plan_*) korunur.
@@ -2191,6 +2195,19 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
       return;
     }
     return subscribeServerData(() => setDataTick((tick) => tick + 1));
+  }, []);
+
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    void plansApi
+      .sablonlar()
+      .then((list) => {
+        cache.planTemplates = list;
+        setPlanTemplates(list);
+      })
+      .catch(() => undefined);
   }, []);
 
   React.useEffect(() => {
@@ -2413,6 +2430,130 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
     setSavedMsg(`"${name}" adıyla kopya oluşturuldu ve ${patient.name} için kaydedildi.`);
   };
 
+  /** Sunucu plan şablonu: kaydet, yükle, ata, yeniden adlandır, sil. */
+  const buildTemplateInput = (name: string) => ({
+    name,
+    notes: notes.trim(),
+    repeatEvery: Math.max(1, Math.min(365, Number(repeat.every) || 1)),
+    repeatUnit: repeat.unit,
+    targetCalories: targets.targetCalories,
+    macros,
+    goal,
+    activityLevel: activity,
+    bmrFormula,
+    hydrationMlPerKg: clinic.nutrition.hydrationMlPerKg,
+    items: items.map((item, index) => ({
+      id: item.id,
+      mealSlot: ["kahvalti", "ara1", "ogle", "ara2", "aksam", "gece"][index] ?? `ekstra-${index + 1}`,
+      label: item.label,
+      calories: Math.round(Number(item.calories) || 0),
+      proteinG: Number(item.proteinG) || 0,
+      carbsG: Number(item.carbsG) || 0,
+      fatG: Number(item.fatG) || 0
+    }))
+  });
+
+  const saveAsTemplate = () => {
+    const name = templateName.trim();
+    if (!name) {
+      setSavedMsg("Şablon için bir ad girin.");
+      return;
+    }
+    setTemplateBusy("save");
+    setSavedMsg(null);
+    void plansApi
+      .sablonKaydet(buildTemplateInput(name))
+      .then((created) => {
+        cache.planTemplates = [created, ...cache.planTemplates.filter((item) => item.id !== created.id)];
+        setPlanTemplates(cache.planTemplates);
+        setSavedMsg(`"${created.name}" şablonu kaydedildi.`);
+      })
+      .catch((error: unknown) => setSavedMsg(errorMessage(error)))
+      .finally(() => setTemplateBusy(null));
+  };
+
+  const loadTemplate = (template: PlanTemplate) => {
+    setTemplateBusy(template.id);
+    setSavedMsg(null);
+    void plansApi
+      .sablonGetir(template.id)
+      .then((full) => {
+        setItems(
+          full.items.map((item, index) => ({
+            id: item.id || `tpl-${full.id}-${index}`,
+            label: item.label,
+            calories: Number(item.calories) || 0,
+            proteinG: Number(item.proteinG) || 0,
+            carbsG: Number(item.carbsG) || 0,
+            fatG: Number(item.fatG) || 0
+          }))
+        );
+        setTemplateName(full.name);
+        setNotes(full.notes ?? "");
+        setRepeat({ every: full.repeatEvery, unit: full.repeatUnit });
+        setGoal(full.goal);
+        setActivity(full.activityLevel);
+        setMacros(full.macros);
+        setSavedMsg(`"${full.name}" şablonu düzenleyiciye yüklendi.`);
+      })
+      .catch((error: unknown) => setSavedMsg(errorMessage(error)))
+      .finally(() => setTemplateBusy(null));
+  };
+
+  const renameTemplate = (template: PlanTemplate) => {
+    const name = window.prompt("Şablon adı", template.name)?.trim();
+    if (!name || name === template.name) {
+      return;
+    }
+    setTemplateBusy(template.id);
+    void plansApi
+      .sablonGuncelle(template.id, { name })
+      .then((updated) => {
+        cache.planTemplates = cache.planTemplates.map((item) => (item.id === updated.id ? updated : item));
+        setPlanTemplates(cache.planTemplates);
+        if (templateName === template.name) setTemplateName(updated.name);
+        setSavedMsg(`Şablon "${updated.name}" olarak güncellendi.`);
+      })
+      .catch((error: unknown) => setSavedMsg(errorMessage(error)))
+      .finally(() => setTemplateBusy(null));
+  };
+
+  const deleteTemplate = (template: PlanTemplate) => {
+    if (!window.confirm(`"${template.name}" şablonu silinsin mi? Bu işlem geri alınamaz.`)) {
+      return;
+    }
+    setTemplateBusy(template.id);
+    void plansApi
+      .sablonSil(template.id)
+      .then(() => {
+        cache.planTemplates = cache.planTemplates.filter((item) => item.id !== template.id);
+        setPlanTemplates(cache.planTemplates);
+        setSavedMsg(`"${template.name}" şablonu silindi.`);
+      })
+      .catch((error: unknown) => setSavedMsg(errorMessage(error)))
+      .finally(() => setTemplateBusy(null));
+  };
+
+  const assignTemplate = (template: PlanTemplate) => {
+    const patient = patients.find((item) => item.id === patientId);
+    if (!patient) {
+      setSavedMsg("Şablonu atamak için bir danışan seçin.");
+      return;
+    }
+    setTemplateBusy(template.id);
+    setSavedMsg(null);
+    void plansApi
+      .sablonAta(template.id, patient.id)
+      .then(() => hydratePatient(patient.id))
+      .then(() => {
+        onUpdatePatient(patient.id, { plan: template.name, lastAction: "Plan şablonu atandı" });
+        setTemplateName(template.name);
+        setSavedMsg(`"${template.name}" ${patient.name} için atandı.`);
+      })
+      .catch((error: unknown) => setSavedMsg(errorMessage(error)))
+      .finally(() => setTemplateBusy(null));
+  };
+
   const setProfileField = (key: keyof BmrInput) => (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const raw = event.target.value;
     setProfile((prev) => ({
@@ -2529,6 +2670,79 @@ const DnDPlanEditor: React.FC<{ patients: Patient[]; onUpdatePatient: UpdatePati
           </button>
         </div>
       </div>
+
+      {IS_HTTP ? (
+        <div className="card">
+          <div className="card-head">
+            <h3>
+              <ClipboardList size={15} /> Plan Şablonları
+            </h3>
+            <button
+              type="button"
+              className="btn btn-primary btn-small"
+              onClick={saveAsTemplate}
+              disabled={templateBusy !== null}
+            >
+              <Plus size={14} /> Şablon olarak kaydet
+            </button>
+          </div>
+          <p className="muted">
+            Şablonlar sunucuda saklanır; farklı danışanlara yeniden atanabilir.
+          </p>
+          {planTemplates.length === 0 ? (
+            <p className="muted">Henüz kayıtlı plan şablonu yok.</p>
+          ) : (
+            <ul className="scenario-list">
+              {planTemplates.map((template) => (
+                <li key={template.id}>
+                  <span>
+                    <strong>{template.name}</strong>{" "}
+                    <span className="muted">
+                      {template.items.length} öğün · {template.targetCalories} kcal · {template.repeatEvery}{" "}
+                      {template.repeatUnit === "week" ? "hafta" : "gün"}
+                    </span>
+                  </span>
+                  <div className="row-actions">
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-small"
+                      onClick={() => loadTemplate(template)}
+                      disabled={templateBusy !== null}
+                    >
+                      Yükle
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-small"
+                      onClick={() => assignTemplate(template)}
+                      disabled={templateBusy !== null}
+                    >
+                      Danışana Ata
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-small"
+                      onClick={() => renameTemplate(template)}
+                      disabled={templateBusy !== null}
+                    >
+                      Adını Değiştir
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn icon-btn-danger"
+                      aria-label={`${template.name} şablonunu sil`}
+                      onClick={() => deleteTemplate(template)}
+                      disabled={templateBusy !== null}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
 
       <div className="card">
         <div className="card-head">
@@ -4019,13 +4233,29 @@ const DrawerPlanTab: React.FC<{ patient: Patient; patients: Patient[]; onUpdateP
   const [grid, setGrid] = React.useState<MealGridState>(() => readMealGrid(patient.id));
   const elapsed = elapsedPlanDays(patient.startDate);
   const compliance = gridCompliance(grid, elapsed);
+  const [serverTemplates, setServerTemplates] = React.useState<PlanTemplate[]>(() =>
+    IS_HTTP ? cache.planTemplates : []
+  );
+
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return;
+    }
+    void plansApi
+      .sablonlar()
+      .then((list) => {
+        cache.planTemplates = list;
+        setServerTemplates(list);
+      })
+      .catch(() => undefined);
+  }, []);
 
   const templates = React.useMemo(() => {
     const saved = Object.values(readPatientRecord<SavedPatientPlan>(PATIENT_PLANS_KEY)).map((plan) => plan.templateName);
-    return Array.from(new Set([patient.plan, ...saved, ...BASE_PLAN_TEMPLATES])).filter(
-      (name) => name && name !== "Plan atanmadı"
-    );
-  }, [patient.plan]);
+    return Array.from(
+      new Set([patient.plan, ...serverTemplates.map((template) => template.name), ...saved, ...BASE_PLAN_TEMPLATES])
+    ).filter((name) => name && name !== "Plan atanmadı");
+  }, [patient.plan, serverTemplates]);
 
   const [planName, setPlanName] = React.useState(() => templates[0] ?? BASE_PLAN_TEMPLATES[0]);
   const [startDate, setStartDate] = React.useState(patient.startDate);
@@ -4066,6 +4296,18 @@ const DrawerPlanTab: React.FC<{ patient: Patient; patients: Patient[]; onUpdateP
     }
     const endDate = addDaysIso(startDate, cycle);
     if (IS_HTTP) {
+      const serverTemplate = serverTemplates.find((item) => item.name === planName);
+      if (serverTemplate) {
+        void plansApi
+          .sablonAta(serverTemplate.id, patient.id, { startDate, endDate })
+          .then(() => hydratePatient(patient.id))
+          .then(() => {
+            onUpdatePatient(patient.id, { plan: planName, startDate, endDate });
+            setAssignMsg({ ok: true, text: `${planName} atandı: ${startDate} → ${endDate}` });
+          })
+          .catch((error: unknown) => setAssignMsg({ ok: false, text: errorMessage(error) }));
+        return;
+      }
       const template = Object.values(readPatientRecord<SavedPatientPlan>(PATIENT_PLANS_KEY)).find(
         (item) => item.templateName === planName
       );
@@ -4107,6 +4349,24 @@ const DrawerPlanTab: React.FC<{ patient: Patient; patients: Patient[]; onUpdateP
     const baseItems = templatePlan && Array.isArray(templatePlan.items) ? templatePlan.items : DEFAULT_PLAN_ITEMS;
     const savedAt = new Date().toISOString();
     if (IS_HTTP) {
+      const serverTemplate = serverTemplates.find((item) => item.name === planName);
+      if (serverTemplate) {
+        void Promise.all(
+          assignments.map(async (assignment) => {
+            await plansApi.sablonAta(serverTemplate.id, assignment.patientId, {
+              targetCalories: assignment.targetCalories,
+              macros: assignment.macros
+            });
+            onUpdatePatient(assignment.patientId, { plan: planName });
+          })
+        )
+          .then(() => {
+            setBulkOpen(false);
+            setAssignMsg({ ok: true, text: `"${planName}" ${assignments.length} danışana atandı.` });
+          })
+          .catch((error: unknown) => setAssignMsg({ ok: false, text: errorMessage(error) }));
+        return;
+      }
       void Promise.all(
         assignments.map(async (assignment) => {
           const plan: SavedPatientPlan = {
