@@ -38,6 +38,7 @@ import {
   Scale,
   Activity,
   UtensilsCrossed,
+  Footprints,
   Timer,
   Flame,
   Wheat,
@@ -79,6 +80,7 @@ import {
   getAccessToken,
   getStoredUser,
   hasRefreshToken,
+  healthApi,
   hydratePatient,
   isPatientLoaded,
   measurementsApi,
@@ -1836,7 +1838,7 @@ const MeasurementsTab: React.FC<{ patient: Patient }> = ({ patient }) => {
   );
 };
 
-type DrawerTab = "ozet" | "zaman" | "plan" | "olcum" | "bildirim" | "kvkk";
+type DrawerTab = "ozet" | "zaman" | "plan" | "olcum" | "bildirim" | "saglik" | "kvkk";
 
 const DRAWER_TABS: Array<{ key: DrawerTab; label: string; icon: React.ReactNode }> = [
   { key: "ozet", label: "Özet", icon: <ClipboardList size={15} /> },
@@ -1844,6 +1846,7 @@ const DRAWER_TABS: Array<{ key: DrawerTab; label: string; icon: React.ReactNode 
   { key: "plan", label: "14 Günlük Plan", icon: <UtensilsCrossed size={15} /> },
   { key: "olcum", label: "Ölçüm & Değerler", icon: <Scale size={15} /> },
   { key: "bildirim", label: "Bildirimler & Notlar", icon: <Bell size={15} /> },
+  { key: "saglik", label: "Sağlık", icon: <Activity size={15} /> },
   { key: "kvkk", label: "Gizlilik & Veri", icon: <ShieldCheck size={15} /> }
 ];
 
@@ -1978,6 +1981,7 @@ const PatientDetailDrawer: React.FC<{
           ) : null}
           {drawerTab === "olcum" ? <MeasurementsTab patient={patient} /> : null}
           {drawerTab === "bildirim" ? <DrawerNotificationsTab key={patient.id} patient={patient} /> : null}
+          {drawerTab === "saglik" ? <DrawerHealthTab key={patient.id} patient={patient} /> : null}
           {drawerTab === "kvkk" ? <PatientPrivacyTab key={patient.id} patient={patient} /> : null}
         </div>
       </div>
@@ -4047,6 +4051,257 @@ const DrawerSummary: React.FC<{ patient: Patient }> = ({ patient }) => {
 };
 
 const BASE_PLAN_TEMPLATES = ["2 Haftalık Fit Plan", "Düşük Karbonhidrat", "Glütensiz 14G"];
+
+const HEALTH_KIND_LABELS: Record<string, string> = {
+  adim: "Adım",
+  mesafe: "Mesafe",
+  kat: "Kat",
+  kalori: "Kalori",
+  toplamKalori: "Toplam kalori",
+  aktifDakika: "Aktif dakika",
+  egzersiz: "Egzersiz",
+  nabiz: "Nabız",
+  dinlenmeNabzi: "Dinlenme nabzı",
+  nabizDegiskenligi: "Nabız değişkenliği",
+  spo2: "SpO₂",
+  solunum: "Solunum",
+  vucutSicakligi: "Vücut sıcaklığı",
+  uyku: "Uyku",
+  kilo: "Kilo",
+  vucutYagi: "Vücut yağı",
+  tansiyon: "Tansiyon",
+  kanSekeri: "Kan şekeri"
+};
+
+const healthDayKey = (iso: string): string =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Istanbul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date(iso));
+
+const healthNumber = (value: unknown): number | null =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
+
+/** Danışanın mobil uygulamadan paylaştığı sağlık verisi (yalnız rıza varsa). */
+const DrawerHealthTab: React.FC<{ patient: Patient }> = ({ patient }) => {
+  const [riza, setRiza] = React.useState<HealthConsent | null>(null);
+  const [data, setData] = React.useState<HealthData | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [range, setRange] = React.useState<7 | 30>(7);
+
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      setLoading(false);
+      return undefined;
+    }
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    setRiza(null);
+    setData(null);
+    void (async () => {
+      try {
+        const consent = await healthApi.riza(patient.id);
+        if (!alive) return;
+        setRiza(consent);
+        if (consent?.status !== "granted") return;
+        const payload = await healthApi.veri(patient.id);
+        if (alive) setData(payload);
+      } catch (loadError) {
+        if (alive) setError(errorMessage(loadError));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [patient.id]);
+
+  if (!IS_HTTP) {
+    return (
+      <div className="drawer-stack">
+        <div className="card">
+          <h3><Activity size={15} /> Sağlık Verisi</h3>
+          <p className="muted">
+            Demo modunda sağlık verisi yok. Gerçek backend bağlıyken danışanın mobil uygulamadan paylaştığı
+            adım, uyku ve nabız verileri burada görünür.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="drawer-stack">
+        <div className="card">
+          <h3><Activity size={15} /> Sağlık Verisi</h3>
+          <p className="muted">Sağlık verisi yükleniyor…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="drawer-stack">
+        <div className="card">
+          <h3><Activity size={15} /> Sağlık Verisi</h3>
+          <p className="field-error">{error}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!riza || riza.status !== "granted") {
+    return (
+      <div className="drawer-stack">
+        <div className="card">
+          <h3><Activity size={15} /> Sağlık Verisi</h3>
+          <p className="muted">Danışan sağlık verisi paylaşımına izin vermedi.</p>
+          <p className="muted muted-tight">
+            Danışan mobil uygulamadan rıza verdiğinde adım, uyku, nabız ve benzeri veriler burada görünür.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const records = data?.kayitlar ?? [];
+  if (records.length === 0) {
+    return (
+      <div className="drawer-stack">
+        <div className="card">
+          <h3><Activity size={15} /> Sağlık Verisi</h3>
+          <p className="muted">Danışan sağlık verisi paylaşımına izin verdi ancak henüz veri göndermedi.</p>
+          <p className="muted muted-tight">
+            Son senkron: {data?.sonSenkron ? new Date(data.sonSenkron).toLocaleString("tr-TR") : "—"}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const startMs = Date.now() - range * 86_400_000;
+  const recent = records.filter((record) => Date.parse(record.zamanDamgasi) >= startMs);
+  const stepsByDay = new Map<string, number>();
+  const sleepByDay = new Map<string, number>();
+  for (const record of recent) {
+    const day = healthDayKey(record.zamanDamgasi);
+    if (record.tur === "adim") {
+      const value = healthNumber(record.deger.adim);
+      if (value !== null) stepsByDay.set(day, (stepsByDay.get(day) ?? 0) + value);
+    } else if (record.tur === "uyku") {
+      const value = healthNumber(record.deger.dakika);
+      if (value !== null) sleepByDay.set(day, (sleepByDay.get(day) ?? 0) + value);
+    }
+  }
+  const stepDays = [...stepsByDay.values()];
+  const totalSteps = stepDays.reduce((sum, value) => sum + value, 0);
+  const avgSteps = stepDays.length > 0 ? Math.round(totalSteps / stepDays.length) : null;
+  const sleepDays = [...sleepByDay.values()];
+  const avgSleepMin =
+    sleepDays.length > 0 ? Math.round(sleepDays.reduce((sum, value) => sum + value, 0) / sleepDays.length) : null;
+  const latest = (kind: string): HealthRecord | undefined =>
+    records.find((record) => record.tur === kind);
+  const restingHr = healthNumber(latest("dinlenmeNabzi")?.deger.bpm);
+  const weight = healthNumber(latest("kilo")?.deger.kg);
+  const chartData = Array.from({ length: range }, (_, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() - (range - 1 - index));
+    const key = healthDayKey(date.toISOString());
+    return {
+      day: new Date(`${key}T00:00:00Z`).toLocaleDateString("tr-TR", { day: "2-digit", month: "2-digit" }),
+      adim: stepsByDay.get(key) ?? 0
+    };
+  });
+
+  return (
+    <div className="drawer-stack">
+      <div className="card">
+        <div className="card-head">
+          <h3><Activity size={15} /> Sağlık Verisi</h3>
+          <div className="card-actions">
+            <button
+              type="button"
+              className={classNames("btn btn-small", range === 7 ? "btn-primary" : "btn-outline")}
+              onClick={() => setRange(7)}
+            >
+              Son 7 gün
+            </button>
+            <button
+              type="button"
+              className={classNames("btn btn-small", range === 30 ? "btn-primary" : "btn-outline")}
+              onClick={() => setRange(30)}
+            >
+              Son 30 gün
+            </button>
+          </div>
+        </div>
+        <p className="muted">
+          Danışanın mobil uygulamadan paylaştığı veriler. Son senkron:{" "}
+          {data?.sonSenkron ? new Date(data.sonSenkron).toLocaleString("tr-TR") : "—"}
+        </p>
+        <div className="grid grid-3">
+          <div className="card mini-stat">
+            <span className="stat-icon stat-emerald"><Footprints size={16} /></span>
+            <small className="muted">Ortalama Adım</small>
+            <strong>{avgSteps === null ? "—" : avgSteps.toLocaleString("tr-TR")}</strong>
+            <small className="muted">{stepDays.length} günlük veri · toplam {totalSteps.toLocaleString("tr-TR")}</small>
+          </div>
+          <div className="card mini-stat">
+            <span className="stat-icon stat-mint"><Flame size={16} /></span>
+            <small className="muted">Ortalama Uyku</small>
+            <strong>{avgSleepMin === null ? "—" : `${(avgSleepMin / 60).toFixed(1)} sa`}</strong>
+            <small className="muted">{sleepDays.length} günlük veri</small>
+          </div>
+          <div className="card mini-stat">
+            <span className="stat-icon stat-amber"><Activity size={16} /></span>
+            <small className="muted">Dinlenme Nabzı / Kilo</small>
+            <strong>{restingHr === null ? "—" : `${Math.round(restingHr)} bpm`}</strong>
+            <small className="muted">{weight === null ? "kilo verisi yok" : `${weight.toFixed(1)} kg`}</small>
+          </div>
+        </div>
+      </div>
+      <div className="card">
+        <h3><Footprints size={15} /> Günlük Adım</h3>
+        {stepDays.length === 0 ? (
+          <p className="muted">Seçilen dönemde adım verisi yok.</p>
+        ) : (
+          <div style={{ width: "100%", height: 220 }}>
+            <ResponsiveContainer>
+              <BarChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="day" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip formatter={(value: number) => [`${value.toLocaleString("tr-TR")} adım`, "Adım"]} />
+                <Bar dataKey="adim" fill="#059669" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+      <div className="card">
+        <h3>Paylaşılan Veri Türleri</h3>
+        <div className="hero-badges">
+          {[...new Set(records.map((record) => record.tur))].map((kind) => (
+            <span key={kind} className="badge badge-slate">
+              {HEALTH_KIND_LABELS[kind] ?? kind}
+            </span>
+          ))}
+        </div>
+        <p className="muted muted-tight">
+          Rıza: {riza.turler && Object.values(riza.turler).filter(Boolean).length} veri türü onaylı ·{" "}
+          {new Date(riza.zamanDamgasi).toLocaleString("tr-TR")}
+        </p>
+      </div>
+    </div>
+  );
+};
 
 interface BulkAssignment {
   patientId: number;

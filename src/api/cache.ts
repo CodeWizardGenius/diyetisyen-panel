@@ -109,6 +109,7 @@ export const markPatientUnloaded = (patientId: number): void => {
   delete cache.timelineByPatient[patientId];
   delete cache.consentByPatient[patientId];
   delete cache.messagesByPatient[patientId];
+  delete cache.healthByPatient[patientId];
   Object.keys(cache.mealGrids).forEach((key) => {
     if (key.startsWith(`${patientId}:`)) {
       delete cache.mealGrids[key];
