@@ -131,6 +131,9 @@ export const trackingApi = {
   aktiviteler(limit = 24) {
     return apiGet<MobileEvent[]>("/panel/aktiviteler", { limit });
   },
+  okunmamis(since: string) {
+    return apiGet<{ count: number }>("/panel/aktiviteler/okunmamis", { since });
+  },
   olaylar(patientNo: number) {
     return apiGet<MobileEvent[]>(`/panel/danisanlar/${patientNo}/olaylar`);
   },

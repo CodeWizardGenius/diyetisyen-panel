@@ -25,7 +25,7 @@ import {
 } from "../../types/mobileData";
 import { timeAgoTr } from "../alerts/alertEngine";
 import { classNames } from "../settings/classNames";
-import { IS_HTTP, cache, subscribeServerData } from "../../api";
+import { IS_HTTP, cache, subscribeServerData, trackingApi } from "../../api";
 
 const FEED_LAST_READ_KEY = "dp_feed_last_read_at";
 const FEED_POLL_MS = 15000;
@@ -142,12 +142,15 @@ export const ActivityFeed: React.FC<Props> = ({ patients, onOpenPatient }) => {
     sortMobileEventsDesc(IS_HTTP ? cache.activities : readMobileEvents())
   );
   const [lastReadAt, setLastReadAt] = React.useState<number>(() => readLastReadAt());
+  const [serverUnread, setServerUnread] = React.useState<number | null>(null);
+  const [refreshTick, setRefreshTick] = React.useState(0);
   const [scenario, setScenario] = React.useState<ScenarioKey>("aktif");
   const [simPatientId, setSimPatientId] = React.useState<number>(() => patients[0]?.id ?? 0);
   const [simMsg, setSimMsg] = React.useState<string | null>(null);
 
   const refresh = React.useCallback(() => {
     setEvents(sortMobileEventsDesc(IS_HTTP ? cache.activities : readMobileEvents()));
+    setRefreshTick((tick) => tick + 1);
   }, []);
 
   // Yeni veri anında görünsün: panel içi değişiklik olayı + periyodik yoklama + sekmeler arası "storage" olayı.
@@ -171,10 +174,26 @@ export const ActivityFeed: React.FC<Props> = ({ patients, onOpenPatient }) => {
     [patients]
   );
 
-  const unread = React.useMemo(
-    () => events.filter((event) => Date.parse(event.receivedAt) > lastReadAt).length,
-    [events, lastReadAt]
-  );
+  // Okunmamış sayısı http modunda sunucudan gelir (100 üst sınırı → "99+").
+  React.useEffect(() => {
+    if (!IS_HTTP) {
+      return undefined;
+    }
+    let alive = true;
+    void trackingApi
+      .okunmamis(new Date(lastReadAt || 0).toISOString())
+      .then((result) => {
+        if (alive) setServerUnread(Math.max(0, Number(result?.count ?? 0)));
+      })
+      .catch(() => {
+        if (alive) setServerUnread(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [lastReadAt, refreshTick]);
+
+  const unread = IS_HTTP ? (serverUnread ?? 0) : events.filter((event) => Date.parse(event.receivedAt) > lastReadAt).length;
 
   const markAllRead = () => {
     const now = Date.now();
@@ -204,7 +223,11 @@ export const ActivityFeed: React.FC<Props> = ({ patients, onOpenPatient }) => {
           <Inbox size={16} /> Canlı Aktivite Akışı
         </h3>
         <div className="feed-head-actions">
-          {unread > 0 ? <span className="count-badge" aria-label={`${unread} okunmamış veri`}>{unread}</span> : null}
+          {unread > 0 ? (
+            <span className="count-badge" aria-label={`${unread} okunmamış veri`}>
+              {unread > 99 ? "99+" : unread}
+            </span>
+          ) : null}
           <button
             type="button"
             className="btn btn-link btn-small"
