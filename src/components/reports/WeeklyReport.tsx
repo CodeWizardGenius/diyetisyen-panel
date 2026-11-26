@@ -160,7 +160,7 @@ export const WeeklyReport: React.FC<Props> = ({ patient, measurements, onClose }
     const toMs = fromMs + 7 * DAY_MS;
 
     const slices = bucketDays(events, measurements, fromMs, 7);
-    const compliance = mealComplianceInRange(events, fromMs, toMs);
+    const compliance = { ...mealComplianceInRange(events, fromMs, toMs), source: "computed" as const };
     const previous = mealComplianceInRange(events, fromMs - 7 * DAY_MS, fromMs);
     const trend =
       compliance.score !== null && previous.score !== null ? compliance.score - previous.score : null;
@@ -329,7 +329,9 @@ export const WeeklyReport: React.FC<Props> = ({ patient, measurements, onClose }
 
           <div className="summary-grid">
             <div className="summary-stat">
-              <span className="muted">Öğün uyumu</span>
+              <span className="muted">
+                Öğün uyumu{report.compliance.source === "manual" ? " (elle girildi)" : ""}
+              </span>
               <strong>{scoreText(report.compliance.score)}</strong>
               <small className="muted">
                 {report.trend === null
